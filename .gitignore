@@ -1,0 +1,58 @@
+# Python virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE & AI Assistant configs
+.agents/
+.claude/
+.gemini/
+.vscode/
+.idea/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+fire_watch_automation.log
+
+# Caches & temporary data
+cache/
+.cache/
+
+# Large generated data files & datasets (uncomment if you want to keep repo lightweight)
+# *.geojson
+grille_meteo_previsionnelle_*.geojson
+grille_tunisie_1km.geojson
+anomalies_*.geojson
+dataset_*.geojson
+previsions_risque_*.geojson
