@@ -1,126 +1,142 @@
 import streamlit as st
-import geopandas as gpd
 import pandas as pd
-import joblib
-import os
-import folium
-from streamlit_folium import st_folium
+import geopandas as gpd
 from sqlalchemy import create_engine
+import pydeck as pdk
+import os
 from dotenv import load_dotenv
-
-# Chargement des variables d'environnement
-load_dotenv()
-SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
 
 # -----------------------------------------------------------------------------
 # Configuration de la page Streamlit
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Tunisia Fire Watch - Dashboard Cloud OSINT",
+    page_title="Tunisia Fire Watch - Dashboard OSINT",
     page_icon="🔥",
     layout="wide"
 )
 
-DOSSIER_PROJET = r"C:\Ba7ath_project\Tunisia-fire-detection"
-MODELE_PATH = os.path.join(DOSSIER_PROJET, "modele_xgboost_tunisia_fire.joblib")
+load_dotenv()
+SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
+
+# Titre et introduction journalistique
+st.title("🔥 Tunisia Fire Watch : Surveillance des Foyers Thermiques")
+st.markdown("""
+*Système de veille automatisé et d'analyse prédictive des risques d'incendie en Tunisie.* 
+Croisement de données satellitaires **NASA FIRMS** (VIIRS 375m), d'imagerie optique **Sentinel-2** et d'un modèle d'intelligence artificielle **XGBoost**.
+""")
 
 # -----------------------------------------------------------------------------
-# Chargement des ressources depuis Supabase et le modèle local
+# Connexion à Supabase et Récupération des Données
 # -----------------------------------------------------------------------------
 @st.cache_resource
-def charger_donnees_supabase():
+def get_db_engine():
     if not SUPABASE_DB_URI:
+        st.error("❌ ERREUR CRITIQUE : La variable SUPABASE_DB_URI est introuvable.")
         return None
+    return create_engine(SUPABASE_DB_URI)
+
+engine = get_db_engine()
+
+@st.cache_data(ttl=600)  # Cache de 10 minutes pour optimiser les performances
+def charger_foyers():
+    if not engine:
+        return pd.DataFrame()
     try:
-        engine = create_engine(SUPABASE_DB_URI)
-        # Lecture directe de la table PostGIS dans un GeoDataFrame
-        query = "SELECT * FROM foyers_actifs;"
-        gdf = gpd.read_postgis(query, engine, geom_col='geom')
-        return gdf
+        query = "SELECT cell_id, acq_date, latitude, longitude, frp, t_max, h_mean, wind_max, ndvi, ndwi, risque_prob, confidence FROM foyers_actifs ORDER BY acq_date DESC;"
+        return pd.read_sql(query, engine)
     except Exception as e:
-        st.error(f"Erreur de connexion à Supabase : {e}")
-        return None
+        st.error(f"Erreur lors de la récupération des données depuis Supabase : {e}")
+        return pd.DataFrame()
 
-@st.cache_resource
-def charger_modele():
-    if os.path.exists(MODELE_PATH):
-        return joblib.load(MODELE_PATH)
-    return None
+df_foyers = charger_foyers()
 
-gdf_anomalies = charger_donnees_supabase()
-modele_ml = charger_modele()
-
-# -----------------------------------------------------------------------------
-# Interface Utilisateur (Sidebar & Filtres)
-# -----------------------------------------------------------------------------
-st.sidebar.title("🔥 Tunisia Fire Watch")
-st.sidebar.markdown("Plateforme Cloud PostGIS & OSINT.")
-st.sidebar.markdown("---")
-
-if gdf_anomalies is None or gdf_anomalies.empty:
-    st.warning("⚠️ Aucune donnée disponible dans la base Supabase ou échec de connexion. Exécute d'abord `Push_To_Supabase.py`.")
+if df_foyers.empty:
+    st.warning("⚠️ Aucun foyer thermique enregistré dans la base de données pour le moment.")
 else:
-    seuil_frp = st.sidebar.slider("Filtrer par Puissance Radiative (FRP min)", 0.0, 100.0, 1.0)
-    confiance_filtre = st.sidebar.selectbox("Niveau de confiance satellite", ["Tous", "Nominal (n)", "High (h)"])
+    # -----------------------------------------------------------------------------
+    # Barre latérale (Filtres OSINT)
+    # -----------------------------------------------------------------------------
+    st.sidebar.header("🔍 Filtres d'Investigation")
     
-    # Application des filtres
-    df_filtré = gdf_anomalies[gdf_anomalies['frp'] >= seuil_frp].copy()
-    if confiance_filtre == "Nominal (n)":
-        df_filtré = df_filtré[df_filtré['confidence'] == 'n']
-    elif confiance_filtre == "High (h)":
-        df_filtré = df_filtré[df_filtré['confidence'] == 'h']
+    # Filtre sur le risque minimal prédit par le modèle
+    seuil_risque = st.sidebar.slider("Seuil de risque minimal (%)", 0, 100, 30)
+    
+    df_filtered = df_foyers[df_foyers['risque_prob'] >= seuil_risque].copy()
 
     # -----------------------------------------------------------------------------
-    # Corps Principal (KPIs & Carte Interactive)
+    # Indicateurs clés (KPIs)
     # -----------------------------------------------------------------------------
-    st.title("Tableau de Bord Cloud & Veille Thermique en Temps Réel")
-    st.markdown("Données synchronisées en direct depuis **Supabase PostGIS** (NASA FIRMS + Open-Meteo + Sentinel-2 + XGBoost).")
-
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Foyers en Base", len(gdf_anomalies))
-    col2.metric("Foyers filtrés", len(df_filtré))
-    col3.metric("Température max", f"{gdf_anomalies['t_max'].max() if 't_max' in gdf_anomalies else 0} °C")
-    col4.metric("FRP maximale", f"{gdf_anomalies['frp'].max() if 'frp' in gdf_anomalies else 0} MW")
+    col1.metric("Total Foyers Détectés", len(df_foyers))
+    col2.metric("Foyers filtrés (> " + str(seuil_risque) + "%)", len(df_filtered))
+    col3.metric("Température Max Moyenne", f"{df_filtered['t_max'].mean():.1f} °C" if not df_filtered.empty else "N/A")
+    col4.metric("FRP (Puissance Radiative) Max", f"{df_filtered['frp'].max():.1f} MW" if not df_filtered.empty else "N/A")
 
     st.markdown("---")
 
-    # Carte Folium
-    st.subheader("🗺️ Carte Spatio-Temporelle (Source Cloud PostGIS)")
+    # -----------------------------------------------------------------------------
+    # Visualisation Cartographique interactive (PyDeck)
+    # -----------------------------------------------------------------------------
+    st.subheader("🗺️ Carte Satellitaire des Foyers Actifs")
     
-    m = folium.Map(location=[34.0, 9.0], zoom_start=7, tiles="OpenStreetMap")
+    if not df_filtered.empty:
+        # Attribution d'une couleur dynamique selon le risque (Vert -> Orange -> Rouge)
+        def get_color(prob):
+            if prob > 75:
+                return [200, 30, 0, 180]   # Rouge critique
+            elif prob > 45:
+                return [255, 140, 0, 180] # Orange modéré
+            else:
+                return [50, 205, 50, 180]  # Vert faible
 
-    for _, row in df_filtré.iterrows():
-        lat, lon = row.geom.y, row.geom.x
-        frp = row['frp']
-        t_max = row['t_max']
-        wind = row['wind_max']
-        ndvi = row['ndvi']
-        risque = row.get('risque_prob', 0.0)
-        
-        couleur = "red" if risque > 75 else "orange" if risque > 40 else "green"
-        
-        popup_html = f"""
-        <b>Zone ID:</b> {row.get('cell_id', 'N/A')}<br>
-        <b>Date:</b> {str(row['acq_date'])[:10]}<br>
-        <b>Risque ML:</b> {risque:.1f}%<br>
-        <b>FRP (Puissance):</b> {frp} MW<br>
-        <b>Température max:</b> {t_max} °C<br>
-        <b>Vent max:</b> {wind} km/h<br>
-        <b>NDVI (Végétation):</b> {ndvi}
-        """
-        
-        folium.CircleMarker(
-            location=[lat, lon],
-            radius=min(max(frp / 5, 4), 15),
-            color=couleur,
-            fill=True,
-            fill_color=couleur,
-            fill_opacity=0.7,
-            popup=folium.Popup(popup_html, max_width=300)
-        ).add_to(m)
+        df_filtered['color'] = df_filtered['risque_prob'].apply(get_color)
+        # Taille proportionnelle à la puissance radiative (FRP)
+        df_filtered['radius'] = df_filtered['frp'].apply(lambda x: max(300, min(x * 100, 3000)))
 
-    st_folium(m, width=1200, height=600)
+        # Configuration de la carte centrée sur la Tunisie
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=df_filtered,
+            get_position='[longitude, latitude]',
+            get_color='color',
+            get_radius='radius',
+            pickable=True,
+            auto_highlight=True,
+            opacity=0.8
+        )
 
-    # Tableau détaillé
-    with st.expander("📋 Inspecter les données stockées dans Supabase"):
-        st.dataframe(df_filtré[['cell_id', 'acq_date', 'latitude', 'longitude', 'frp', 't_max', 'wind_max', 'ndvi', 'ndwi', 'risque_prob']])
+        # Vue par défaut sur la Tunisie
+        view_state = pdk.ViewState(
+            latitude=34.0,
+            longitude=9.0,
+            zoom=6,
+            pitch=30,
+        )
+
+        r = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            tooltip={
+                "html": "<b>Date :</b> {acq_date}<br/>"
+                        "<b>Risque IA :</b> {risque_prob}%<br/>"
+                        "<b>FRP :</b> {frp} MW<br/>"
+                        "<b>Température :</b> {t_max} °C",
+                "style": {"backgroundColor": "black", "color": "white"}
+            }
+        )
+
+        st.pydeck_chart(r)
+    else:
+        st.info("Aucun foyer ne correspond au seuil de risque sélectionné.")
+
+    # -----------------------------------------------------------------------------
+    # Tableau de Données Détaillées (Transparence OSINT)
+    # -----------------------------------------------------------------------------
+    with st.expander("📊 Afficher les données brutes et métriques associées"):
+        st.dataframe(df_filtered[['acq_date', 'latitude', 'longitude', 'risque_prob', 'frp', 't_max', 'h_mean', 'wind_max', 'confidence']])
+
+# -----------------------------------------------------------------------------
+# Pied de page journalistique
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("<p style='text-align: center; color: gray;'>Développé pour l'investigation OSINT — Projet Ba7ath</p>", unsafe_allow_html=True)
