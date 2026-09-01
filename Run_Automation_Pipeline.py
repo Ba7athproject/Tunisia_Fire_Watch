@@ -112,18 +112,32 @@ def fetch_recent_firms_data():
         return gpd.GeoDataFrame()
 
 def get_open_meteo_forecast(lat, lon):
-    # Pause de 0.5 seconde pour éviter le blocage anti-spam (Rate Limiting) de l'API gratuite
-    time.sleep(0.5) 
+    # On passe la pause à 1.5 seconde pour lisser les 70 requêtes dans le temps
+    time.sleep(1.5) 
     
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum&timezone=auto"
+    
+    # Stratégie de robustesse identique à celle utilisée pour la NASA
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    # Camouflage basique
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
     try:
-        response = requests.get(url, timeout=10)
+        # On allonge le timeout à 20 secondes
+        response = session.get(url, headers=headers, timeout=20)
         
-        # Gestion spécifique du code 429 (Too Many Requests) pour des logs plus clairs
-        if response.status_code == 429:
-            logging.warning("API Open-Meteo : Limite de requêtes atteinte. Valeurs par défaut appliquées.")
-            
-        elif response.status_code == 200:
+        if response.status_code == 200:
             data = response.json().get('daily', {})
             return {
                 't_max': data.get('temperature_2m_max', [38.0])[0],
@@ -131,12 +145,14 @@ def get_open_meteo_forecast(lat, lon):
                 'wind_max': data.get('wind_speed_10m_max', [15.0])[0],
                 'precip_sum': data.get('precipitation_sum', [0.0])[0]
             }
+        else:
+            logging.warning(f"API Open-Meteo a répondu avec le code : {response.status_code}")
+            
     except Exception as e:
         logging.warning(f"Alerte API Open-Meteo (Valeurs par défaut appliquées) : {e}")
         
-    # Valeurs de repli garantissant que le modèle XGBoost ne plantera jamais
     return {'t_max': 38.0, 'h_mean': 45.0, 'wind_max': 15.0, 'precip_sum': 0.0}
-    
+
 def get_sentinel_indices(catalog, bbox):
     try:
         date_fin = datetime.now()
