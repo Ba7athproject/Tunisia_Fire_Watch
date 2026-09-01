@@ -1,6 +1,7 @@
 import os
 import io
 import zlib
+import time
 import logging
 from datetime import datetime, timedelta
 import numpy as np
@@ -111,10 +112,18 @@ def fetch_recent_firms_data():
         return gpd.GeoDataFrame()
 
 def get_open_meteo_forecast(lat, lon):
+    # Pause de 0.5 seconde pour éviter le blocage anti-spam (Rate Limiting) de l'API gratuite
+    time.sleep(0.5) 
+    
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum&timezone=auto"
     try:
         response = requests.get(url, timeout=10)
-        if response.status_code == 200:
+        
+        # Gestion spécifique du code 429 (Too Many Requests) pour des logs plus clairs
+        if response.status_code == 429:
+            logging.warning("API Open-Meteo : Limite de requêtes atteinte. Valeurs par défaut appliquées.")
+            
+        elif response.status_code == 200:
             data = response.json().get('daily', {})
             return {
                 't_max': data.get('temperature_2m_max', [38.0])[0],
@@ -124,8 +133,10 @@ def get_open_meteo_forecast(lat, lon):
             }
     except Exception as e:
         logging.warning(f"Alerte API Open-Meteo (Valeurs par défaut appliquées) : {e}")
+        
+    # Valeurs de repli garantissant que le modèle XGBoost ne plantera jamais
     return {'t_max': 38.0, 'h_mean': 45.0, 'wind_max': 15.0, 'precip_sum': 0.0}
-
+    
 def get_sentinel_indices(catalog, bbox):
     try:
         date_fin = datetime.now()
@@ -231,11 +242,13 @@ def run_automated_pipeline():
         })
 
     if records:
-        gdf_resultat = gpd.GeoDataFrame(records, crs="EPSG:4326")
-        gdf_resultat = gdf_resultat.rename_geometry('geom')
+        # On spécifie explicitement geometry='geom'
+        gdf_resultat = gpd.GeoDataFrame(records, geometry='geom', crs="EPSG:4326")
+        
         try:
             gdf_resultat.to_postgis('foyers_actifs', engine, if_exists='append', index=False)
             logging.info(f"Succès : {len(records)} nouveaux foyers insérés dans Supabase.")
+        
         except Exception as e:
             logging.error(f"Erreur d'insertion PostGIS : {e}")
     else:
