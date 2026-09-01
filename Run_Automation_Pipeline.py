@@ -48,7 +48,7 @@ MODELE_PATH = "modele_xgboost_tunisia_fire.joblib"
 SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
 FIRMS_MAP_KEY = os.getenv("FIRMS_MAP_KEY")
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
-
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 # Cache mémoire pour mutualiser les requêtes météo des points géographiquement proches
 METEO_CACHE = {}
 
@@ -127,58 +127,57 @@ def fetch_recent_firms_data():
 
 def get_open_meteo_forecast(lat, lon):
     """
-    Récupère les paramètres météorologiques avec cache spatial.
-    Utilise l'empreinte de 'curl' pour contourner le filtrage Cloudflare des serveurs GitHub.
+    Récupère les paramètres météorologiques avec cache spatial via WeatherAPI.
+    Utilise une clé API pour éviter le bannissement IP des serveurs GitHub Actions.
     """
     cache_key = (round(lat, 1), round(lon, 1))
     if cache_key in METEO_CACHE:
         return METEO_CACHE[cache_key]
 
     time.sleep(1)
+    
+    if not WEATHER_API_KEY:
+        logging.error("Clé WEATHER_API_KEY manquante. Valeurs par défaut appliquées.")
+        fallback = {'t_max': 38.0, 'h_mean': 45.0, 'wind_max': 15.0, 'precip_sum': 0.0}
+        METEO_CACHE[cache_key] = fallback
+        return fallback
 
-    url = (
-        f"https://api.open-meteo.com/v1/forecast?"
-        f"latitude={lat}&longitude={lon}&"
-        f"daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum&"
-        f"timezone=auto"
-    )
+    # Appel vers WeatherAPI (forecast sur 1 jour)
+    url = f"https://api.weatherapi.com/v1/forecast.json?key={WEATHER_API_KEY}&q={lat},{lon}&days=1"
     
     session = requests.Session()
-    # On réduit les retries à 0 (fail-fast). Si GitHub Actions est bloqué, 
-    # on applique le fallback instantanément pour ne pas geler le pipeline.
-    retry_strategy = Retry(total=0, status_forcelist=[429, 500, 502, 503, 504])
+    retry_strategy = Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    
-    # Camouflage : Simulation de l'outil en ligne de commande "curl"
-    # Généralement whitelisté par les API de développeurs derrière Cloudflare
+
     headers = {
-        "User-Agent": "curl/7.81.0",
-        "Accept": "*/*"
+        "User-Agent": "TunisiaFireWatch-OSINT/1.0 (ba7ath investigative project)"
     }
 
     try:
-        # Timeout court : on ne laisse pas Cloudflare nous faire patienter dans le vide
-        response = session.get(url, headers=headers, timeout=8)
+        response = session.get(url, headers=headers, timeout=12)
         
         if response.status_code == 200:
-            data = response.json().get('daily', {})
+            data = response.json()
+            # Extraction des données journalières depuis la réponse JSON
+            day = data['forecast']['forecastday'][0]['day']
+            
             result = {
-                't_max': data.get('temperature_2m_max', [38.0])[0],
-                'h_mean': data.get('relative_humidity_2m_mean', [45.0])[0],
-                'wind_max': data.get('wind_speed_10m_max', [15.0])[0],
-                'precip_sum': data.get('precipitation_sum', [0.0])[0]
+                't_max': float(day['maxtemp_c']),
+                'h_mean': float(day['avghumidity']),
+                'wind_max': float(day['maxwind_kph']),
+                'precip_sum': float(day['totalprecip_mm'])
             }
             METEO_CACHE[cache_key] = result
             return result
         else:
-            logging.warning(f"API Open-Meteo code {response.status_code}. Valeurs de repli appliquées.")
+            logging.warning(f"API Météo code {response.status_code}. Valeurs de repli appliquées.")
             
     except Exception as e:
-        logging.warning(f"Alerte API Open-Meteo (timeout/blocage). Valeurs de repli appliquées.")
+        logging.warning(f"Alerte API Météo ({e}). Valeurs de repli appliquées.")
         
-    # Fallback garanti pour que XGBoost fonctionne toujours
+    # Fallback de sécurité
     fallback = {'t_max': 38.0, 'h_mean': 45.0, 'wind_max': 15.0, 'precip_sum': 0.0}
     METEO_CACHE[cache_key] = fallback
     return fallback
