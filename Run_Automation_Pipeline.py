@@ -13,7 +13,13 @@ import planetary_computer
 import odc.stac
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+import socket
+import urllib3.util.connection as urllib3_cn
 
+# Forcer l'utilisation exclusive de l'IPv4 (contourne le bug IPv6 des serveurs NASA sur GitHub Actions)
+def allowed_gai_family():
+    return socket.AF_INET
+urllib3_cn.allowed_gai_family = allowed_gai_family
 # -----------------------------------------------------------------------------
 # Configuration & Journalisation Sécurisée
 # -----------------------------------------------------------------------------
@@ -86,7 +92,7 @@ def fetch_recent_firms_data():
     except Exception as e:
         logging.error(f"Erreur inattendue lors du traitement des données FIRMS : {e}")
         return gpd.GeoDataFrame()
-        
+
 def get_open_meteo_forecast(lat, lon):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum&timezone=auto"
     try:
@@ -167,7 +173,7 @@ def run_automated_pipeline():
         
         with engine.connect() as conn:
             query_check = text("SELECT COUNT(*) FROM foyers_actifs WHERE cell_id = :cid AND acq_date = :adate")
-            res = conn.execute(query_check, {"cid": int(row['cell_id']), "adate": row['acq_date']}).scalar()
+            res = conn.execute(query_check, {"cid": int(row['cell_id']), "adate": str(row['acq_date']).strip()}).scalar()
             if res > 0:
                 logging.info(f"Foyer GPS ({lat:.4f}, {lon:.4f}) du {row['acq_date']} déjà présent. Ignoré.")
                 continue
