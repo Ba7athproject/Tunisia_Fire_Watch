@@ -36,43 +36,41 @@ STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 def fetch_recent_firms_data():
     """
     Récupère les véritables données d'anomalies thermiques en temps quasi-réel (NRT) 
-    via l'API NASA FIRMS pour la Tunisie (capteur VIIRS SNPP 375m).
+    via l'API NASA FIRMS en utilisant une emprise spatiale (Bounding Box) pour la Tunisie.
     """
-    logging.info("Interrogation de l'API NASA FIRMS avec la clé officielle...")
+    logging.info("Interrogation de l'API NASA FIRMS via Bounding Box spatiale...")
     
     if not FIRMS_MAP_KEY:
-        logging.error("Clé API NASA FIRMS manquante. Vérifiez vos variables d'environnement (.env ou Secrets).")
+        logging.error("Clé API NASA FIRMS manquante. Vérifiez vos variables d'environnement.")
         return gpd.GeoDataFrame()
         
-    # URL de l'API FIRMS par pays. 
-    # Source : VIIRS_SNPP_NRT (375m) / Pays : TUN (Tunisie) / Durée : 1 jour
-    url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/TUN/1"
+    # L'endpoint /country/ étant désactivé par la NASA, on utilise /area/
+    # Bounding Box de la Tunisie : West,South,East,North (7.5,30.2,11.6,37.6)
+    # Source : VIIRS_SNPP_NRT (375m) / Durée : 1 jour
+    bbox_tunisie = "7.5,30.2,11.6,37.6"
+    url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/{bbox_tunisie}/1"
     
     try:
         response = requests.get(url, timeout=15)
-        response.raise_for_status() # Lève une exception si le statut HTTP indique une erreur
+        response.raise_for_status() 
         
-        # Le flux retourné est un CSV. Nous le lisons directement en mémoire avec Pandas.
         df_firms = pd.read_csv(io.StringIO(response.text))
         
         if df_firms.empty:
-            logging.info("API NASA : Aucun foyer thermique détecté dans les dernières 24h pour la Tunisie.")
+            logging.info("API NASA : Aucun foyer thermique détecté dans les dernières 24h sur l'emprise tunisienne.")
             return gpd.GeoDataFrame()
             
-        # L'API ne fournit pas de 'cell_id' natif, on génère un identifiant entier unique 
-        # basé sur les coordonnées GPS pour garantir la protection anti-doublon dans Supabase.
+        # Génération de l'identifiant anti-doublon
         df_firms['cell_id'] = df_firms.apply(
             lambda row: zlib.crc32(f"{row['latitude']}_{row['longitude']}".encode()), 
             axis=1
         )
         
-        # S'assurer que le niveau de confiance est traité comme une chaîne de caractères
         if 'confidence' in df_firms.columns:
             df_firms['confidence'] = df_firms['confidence'].astype(str)
         else:
-            df_firms['confidence'] = 'u' # unknown par défaut
+            df_firms['confidence'] = 'u'
             
-        # Conversion en format géospatial
         gdf = gpd.GeoDataFrame(
             df_firms, 
             geometry=gpd.points_from_xy(df_firms.longitude, df_firms.latitude),
@@ -88,7 +86,7 @@ def fetch_recent_firms_data():
     except Exception as e:
         logging.error(f"Erreur inattendue lors du traitement des données FIRMS : {e}")
         return gpd.GeoDataFrame()
-
+        
 def get_open_meteo_forecast(lat, lon):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum&timezone=auto"
     try:
