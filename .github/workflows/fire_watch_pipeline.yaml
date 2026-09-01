@@ -12,6 +12,7 @@ jobs:
     # TRÈS IMPORTANT : On déclare ici le Secret pour qu'il soit accessible comme variable d'environnement
     env:
       SUPABASE_DB_URI: ${{ secrets.SUPABASE_DB_URI }}
+      FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
 
     steps:
       - name: Checkout repository
