@@ -49,12 +49,13 @@ SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
 FIRMS_MAP_KEY = os.getenv("FIRMS_MAP_KEY")
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
+
 # Cache mémoire pour mutualiser les requêtes météo des points géographiquement proches
 METEO_CACHE = {}
 
 
 # -----------------------------------------------------------------------------
-# 2. Fonctions d'Acquisition de Données Satellitaires & Météo
+# 2. Fonctions d'Acquisition de Données Satellitaires, Météo & Croisement Spatial
 # -----------------------------------------------------------------------------
 def fetch_recent_firms_data():
     """
@@ -182,6 +183,7 @@ def get_open_meteo_forecast(lat, lon):
     METEO_CACHE[cache_key] = fallback
     return fallback
 
+
 def get_sentinel_indices(catalog, bbox):
     """
     Extrait la médiane des indices de végétation (NDVI) et d'humidité (NDWI) 
@@ -214,6 +216,30 @@ def get_sentinel_indices(catalog, bbox):
         return round(ndvi if not np.isnan(ndvi) else 0.25, 3), round(ndwi if not np.isnan(ndwi) else 0.05, 3)
     except Exception:
         return 0.25, 0.05
+
+
+def enrichir_contexte_spatial(engine):
+    """
+    Exécute une mise à jour spatiale dans PostGIS pour lier 
+    les foyers actifs aux entités administratives (gouvernorats) via ST_Intersects.
+    """
+    logging.info("Exécution du croisement spatial PostGIS (Gouvernorats)...")
+    
+    # Requête SQL spatiale s'appuyant sur shapeName du GeoJSON importé
+    query_spatial_join = """
+    UPDATE foyers_actifs f
+    SET gouvernorat = g."shapeName"
+    FROM tunisia_gouvernorats g
+    WHERE ST_Intersects(f.geom, g.geometry)
+    AND (f.gouvernorat IS NULL OR f.gouvernorat = '');
+    """
+    
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(query_spatial_join))
+        logging.info("✔ Croisement spatial PostGIS effectué avec succès.")
+    except Exception as e:
+        logging.warning(f"Alerte lors du croisement spatial : {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -313,6 +339,10 @@ def run_automated_pipeline():
         try:
             gdf_resultat.to_postgis('foyers_actifs', engine, if_exists='append', index=False)
             logging.info(f"Succès : {len(records)} nouveaux foyers insérés dans Supabase.")
+            
+            # --- Lancement du croisement spatial PostGIS ---
+            enrichir_contexte_spatial(engine)
+            
         except Exception as e:
             logging.error(f"Erreur d'insertion PostGIS : {e}")
     else:
