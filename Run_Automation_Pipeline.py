@@ -1,4 +1,6 @@
 import os
+import io
+import zlib
 import logging
 from datetime import datetime, timedelta
 import numpy as np
@@ -26,33 +28,66 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(console_handler)
 
-# Utilisation d'un chemin relatif pour assurer la compatibilité entre le local (Windows) et le cloud (GitHub Actions)
 MODELE_PATH = "modele_xgboost_tunisia_fire.joblib"
 SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
+FIRMS_MAP_KEY = os.getenv("FIRMS_MAP_KEY")
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
 def fetch_recent_firms_data():
     """
-    Simule ou récupère les données FIRMS en appliquant un filtre temporel strict 
-    pour éviter de retraiter des anomalies déjà enregistrées.
+    Récupère les véritables données d'anomalies thermiques en temps quasi-réel (NRT) 
+    via l'API NASA FIRMS pour la Tunisie (capteur VIIRS SNPP 375m).
     """
-    logging.info("Interrogation sécurisée de l'API NASA FIRMS...")
-    df_firms = pd.DataFrame({
-        'latitude': [36.75, 36.08, 36.53],
-        'longitude': [8.45, 9.64, 10.27],
-        'bright_ti4': [350.0, 367.0, 343.2],
-        'bright_ti5': [310.0, 316.0, 305.0],
-        'frp': [42.0, 75.0, 15.0],
-        'confidence': ['h', 'h', 'n'],
-        'acq_date': [datetime.now().strftime('%Y-%m-%d')] * 3,
-        'cell_id': [141300, 130395, 179544]
-    })
-    gdf = gpd.GeoDataFrame(
-        df_firms, 
-        geometry=gpd.points_from_xy(df_firms.longitude, df_firms.latitude),
-        crs="EPSG:4326"
-    )
-    return gdf
+    logging.info("Interrogation de l'API NASA FIRMS avec la clé officielle...")
+    
+    if not FIRMS_MAP_KEY:
+        logging.error("Clé API NASA FIRMS manquante. Vérifiez vos variables d'environnement (.env ou Secrets).")
+        return gpd.GeoDataFrame()
+        
+    # URL de l'API FIRMS par pays. 
+    # Source : VIIRS_SNPP_NRT (375m) / Pays : TUN (Tunisie) / Durée : 1 jour
+    url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/TUN/1"
+    
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status() # Lève une exception si le statut HTTP indique une erreur
+        
+        # Le flux retourné est un CSV. Nous le lisons directement en mémoire avec Pandas.
+        df_firms = pd.read_csv(io.StringIO(response.text))
+        
+        if df_firms.empty:
+            logging.info("API NASA : Aucun foyer thermique détecté dans les dernières 24h pour la Tunisie.")
+            return gpd.GeoDataFrame()
+            
+        # L'API ne fournit pas de 'cell_id' natif, on génère un identifiant entier unique 
+        # basé sur les coordonnées GPS pour garantir la protection anti-doublon dans Supabase.
+        df_firms['cell_id'] = df_firms.apply(
+            lambda row: zlib.crc32(f"{row['latitude']}_{row['longitude']}".encode()), 
+            axis=1
+        )
+        
+        # S'assurer que le niveau de confiance est traité comme une chaîne de caractères
+        if 'confidence' in df_firms.columns:
+            df_firms['confidence'] = df_firms['confidence'].astype(str)
+        else:
+            df_firms['confidence'] = 'u' # unknown par défaut
+            
+        # Conversion en format géospatial
+        gdf = gpd.GeoDataFrame(
+            df_firms, 
+            geometry=gpd.points_from_xy(df_firms.longitude, df_firms.latitude),
+            crs="EPSG:4326"
+        )
+        
+        logging.info(f"✔ API NASA : {len(gdf)} foyers thermiques bruts récupérés.")
+        return gdf
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Erreur de connexion réseau à l'API NASA FIRMS : {e}")
+        return gpd.GeoDataFrame()
+    except Exception as e:
+        logging.error(f"Erreur inattendue lors du traitement des données FIRMS : {e}")
+        return gpd.GeoDataFrame()
 
 def get_open_meteo_forecast(lat, lon):
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum&timezone=auto"
@@ -94,17 +129,22 @@ def run_automated_pipeline():
     logging.info("==================================================")
     logging.info("--- Démarrage de la synchronisation automatisée ---")
     
-    # Diagnostic précis pour identifier la source exacte du blocage
     config_valide = True
     
     if not SUPABASE_DB_URI:
-        logging.error("❌ ERREUR CRITIQUE : La variable SUPABASE_DB_URI est vide ou non transmise par l'environnement.")
+        logging.error("❌ ERREUR CRITIQUE : La variable SUPABASE_DB_URI est vide.")
         config_valide = False
     else:
         logging.info("✔ SUPABASE_DB_URI détectée avec succès.")
 
+    if not FIRMS_MAP_KEY:
+        logging.error("❌ ERREUR CRITIQUE : La variable FIRMS_MAP_KEY est vide.")
+        config_valide = False
+    else:
+        logging.info("✔ FIRMS_MAP_KEY détectée avec succès.")
+
     if not os.path.exists(MODELE_PATH):
-        logging.error(f"❌ ERREUR CRITIQUE : Le fichier modèle '{MODELE_PATH}' est introuvable sur le disque.")
+        logging.error(f"❌ ERREUR CRITIQUE : Le fichier modèle '{MODELE_PATH}' est introuvable.")
         config_valide = False
     else:
         logging.info(f"✔ Modèle trouvé à l'emplacement : {MODELE_PATH}")
@@ -119,7 +159,7 @@ def run_automated_pipeline():
 
     gdf_firms = fetch_recent_firms_data()
     if gdf_firms.empty:
-        logging.info("Aucune nouvelle anomalie détectée.")
+        logging.info("Aucune nouvelle anomalie détectée via NASA FIRMS. Fin du traitement.")
         return
 
     records = []
@@ -127,16 +167,18 @@ def run_automated_pipeline():
         lat, lon = row.geometry.y, row.geometry.x
         bbox = list(row.geometry.buffer(0.001).bounds)
         
-        # Vérification anti-doublon dans la base Supabase (même cellule à la même date)
         with engine.connect() as conn:
             query_check = text("SELECT COUNT(*) FROM foyers_actifs WHERE cell_id = :cid AND acq_date = :adate")
             res = conn.execute(query_check, {"cid": int(row['cell_id']), "adate": row['acq_date']}).scalar()
             if res > 0:
-                logging.info(f"Foyer cell_id {row['cell_id']} du {row['acq_date']} déjà présent en base. Ignoré.")
+                logging.info(f"Foyer GPS ({lat:.4f}, {lon:.4f}) du {row['acq_date']} déjà présent. Ignoré.")
                 continue
 
         meteo = get_open_meteo_forecast(lat, lon)
         ndvi, ndwi = get_sentinel_indices(catalog, bbox)
+
+        # L'API NASA VIIRS renvoie 'frp'. Nous vérifions son existence.
+        frp_value = float(row.get('frp', 0.0))
 
         features = pd.DataFrame([{
             't_max': meteo['t_max'],
@@ -145,7 +187,7 @@ def run_automated_pipeline():
             'precip_sum': meteo['precip_sum'],
             'ndvi': ndvi,
             'ndwi': ndwi,
-            'frp': row['frp']
+            'frp': frp_value
         }])
         features = features[['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi', 'frp']]
 
@@ -156,7 +198,7 @@ def run_automated_pipeline():
             'acq_date': pd.to_datetime(row['acq_date']),
             'latitude': lat,
             'longitude': lon,
-            'frp': float(row['frp']),
+            'frp': frp_value,
             't_max': float(meteo['t_max']),
             'h_mean': float(meteo['h_mean']),
             'wind_max': float(meteo['wind_max']),
