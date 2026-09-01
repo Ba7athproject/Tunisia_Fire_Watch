@@ -1,44 +1,47 @@
 name: Tunisia Fire Watch - Automated Pipeline
 
+# Fréquence d'exécution : Toutes les 6 heures (cron UTC)
+# 0 0,6,12,18 * * * signifie à 00:00, 06:00, 12:00 et 18:00 UTC
 on:
   schedule:
     - cron: '0 0,6,12,18 * * *'
+  # Permet aussi de déclencher le script manuellement depuis l'onglet "Actions" de GitHub
   workflow_dispatch:
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     
-    # TRÈS IMPORTANT : On déclare ici le Secret pour qu'il soit accessible comme variable d'environnement
+    # Injection des secrets nécessaires au pipeline
     env:
       SUPABASE_DB_URI: ${{ secrets.SUPABASE_DB_URI }}
       FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
 
     steps:
+      # 1. Récupération du code source du dépôt
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Configuration de l'environnement Python
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Install system geospatial dependencies
+      # 3. Installation des dépendances système nécessaires pour GeoPandas / GDAL / PostGIS
+      - name: Install system geospatial dependencies (GDAL/GEOS)
         run: |
           sudo apt-get update
           sudo apt-get install -y libgdal-dev gdal-bin libgeos-dev
 
+      # 4. Installation des bibliothèques Python du projet
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
           pip install pandas geopandas shapely requests pystac-client planetary-computer odc-stac xgboost scikit-learn joblib sqlalchemy psycopg2-binary geoalchemy2 python-dotenv rioxarray
 
-      # Si le modèle n'est pas versionné sur le repo, on le génère à la volée avant de lancer la prédiction
-      - name: Ensure Model Exists
-        run: |
-          python Train_XGBoost_Fire_Model.py || echo "Modèle déjà présent ou entraînement ignoré"
-
+      # 5. Exécution du script d'automatisation
       - name: Run Data Collection & Prediction Pipeline
         run: |
           python Run_Automation_Pipeline.py
