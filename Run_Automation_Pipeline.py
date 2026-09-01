@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 # Configuration & Journalisation Sécurisée
 # -----------------------------------------------------------------------------
 load_dotenv()
+
 logging.basicConfig(
     filename='fire_watch_automation.log',
     level=logging.INFO,
@@ -25,8 +26,8 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(console_handler)
 
-DOSSIER_PROJET = r"C:\Ba7ath_project\Tunisia-fire-detection"
-MODELE_PATH = os.path.join(DOSSIER_PROJET, "modele_xgboost_tunisia_fire.joblib")
+# Utilisation d'un chemin relatif pour assurer la compatibilité entre le local (Windows) et le cloud (GitHub Actions)
+MODELE_PATH = "modele_xgboost_tunisia_fire.joblib"
 SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
@@ -36,7 +37,6 @@ def fetch_recent_firms_data():
     pour éviter de retraiter des anomalies déjà enregistrées.
     """
     logging.info("Interrogation sécurisée de l'API NASA FIRMS...")
-    # Simulation de détections récentes du jour
     df_firms = pd.DataFrame({
         'latitude': [36.75, 36.08, 36.53],
         'longitude': [8.45, 9.64, 10.27],
@@ -94,8 +94,12 @@ def run_automated_pipeline():
     logging.info("==================================================")
     logging.info("--- Démarrage de la synchronisation automatisée ---")
     
-    if not SUPABASE_DB_URI or not os.path.exists(MODELE_PATH):
-        logging.error("Configuration invalide : URI Supabase ou modèle introuvable.")
+    if not SUPABASE_DB_URI:
+        logging.error("Configuration invalide : URI Supabase manquante.")
+        return
+        
+    if not os.path.exists(MODELE_PATH):
+        logging.error(f"Configuration invalide : Modèle introuvable à l'emplacement '{MODELE_PATH}'.")
         return
 
     engine = create_engine(SUPABASE_DB_URI)
@@ -112,7 +116,7 @@ def run_automated_pipeline():
         lat, lon = row.geometry.y, row.geometry.x
         bbox = list(row.geometry.buffer(0.001).bounds)
         
-        # Vérification anti-doublon dans la base Supabase (ex: même cellule à la même date)
+        # Vérification anti-doublon dans la base Supabase (même cellule à la même date)
         with engine.connect() as conn:
             query_check = text("SELECT COUNT(*) FROM foyers_actifs WHERE cell_id = :cid AND acq_date = :adate")
             res = conn.execute(query_check, {"cid": int(row['cell_id']), "adate": row['acq_date']}).scalar()
