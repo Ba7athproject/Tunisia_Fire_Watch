@@ -12,6 +12,7 @@ jobs:
     env:
       SUPABASE_DB_URI: ${{ secrets.SUPABASE_DB_URI }}
       FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+      WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
 
     steps:
       - name: Checkout repository
