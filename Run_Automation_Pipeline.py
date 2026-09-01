@@ -15,6 +15,8 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import socket
 import urllib3.util.connection as urllib3_cn
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Forcer l'utilisation exclusive de l'IPv4 (contourne le bug IPv6 des serveurs NASA sur GitHub Actions)
 def allowed_gai_family():
@@ -43,6 +45,7 @@ def fetch_recent_firms_data():
     """
     Récupère les véritables données d'anomalies thermiques en temps quasi-réel (NRT) 
     via l'API NASA FIRMS en utilisant une emprise spatiale (Bounding Box) pour la Tunisie.
+    Intègre un User-Agent de contournement et une stratégie de Retry.
     """
     logging.info("Interrogation de l'API NASA FIRMS via Bounding Box spatiale...")
     
@@ -50,14 +53,29 @@ def fetch_recent_firms_data():
         logging.error("Clé API NASA FIRMS manquante. Vérifiez vos variables d'environnement.")
         return gpd.GeoDataFrame()
         
-    # L'endpoint /country/ étant désactivé par la NASA, on utilise /area/
-    # Bounding Box de la Tunisie : West,South,East,North (7.5,30.2,11.6,37.6)
-    # Source : VIIRS_SNPP_NRT (375m) / Durée : 1 jour
     bbox_tunisie = "7.5,30.2,11.6,37.6"
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/{bbox_tunisie}/1"
     
+    # 1. Stratégie de réessai : relancer 3 fois en cas de surcharge des serveurs NASA
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    # 2. Camouflage : Se faire passer pour un navigateur web légitime pour tromper le pare-feu
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept": "text/csv,application/csv,text/plain"
+    }
+    
     try:
-        response = requests.get(url, timeout=15)
+        # 3. On passe le timeout à 45 secondes pour laisser le temps au serveur de la NASA de générer le fichier
+        response = session.get(url, headers=headers, timeout=45)
         response.raise_for_status() 
         
         df_firms = pd.read_csv(io.StringIO(response.text))
@@ -66,7 +84,6 @@ def fetch_recent_firms_data():
             logging.info("API NASA : Aucun foyer thermique détecté dans les dernières 24h sur l'emprise tunisienne.")
             return gpd.GeoDataFrame()
             
-        # Génération de l'identifiant anti-doublon
         df_firms['cell_id'] = df_firms.apply(
             lambda row: zlib.crc32(f"{row['latitude']}_{row['longitude']}".encode()), 
             axis=1
