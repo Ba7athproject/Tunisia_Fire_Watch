@@ -94,12 +94,23 @@ def run_automated_pipeline():
     logging.info("==================================================")
     logging.info("--- Démarrage de la synchronisation automatisée ---")
     
+    # Diagnostic précis pour identifier la source exacte du blocage
+    config_valide = True
+    
     if not SUPABASE_DB_URI:
-        logging.error("Configuration invalide : URI Supabase manquante.")
-        return
-        
+        logging.error("❌ ERREUR CRITIQUE : La variable SUPABASE_DB_URI est vide ou non transmise par l'environnement.")
+        config_valide = False
+    else:
+        logging.info("✔ SUPABASE_DB_URI détectée avec succès.")
+
     if not os.path.exists(MODELE_PATH):
-        logging.error(f"Configuration invalide : Modèle introuvable à l'emplacement '{MODELE_PATH}'.")
+        logging.error(f"❌ ERREUR CRITIQUE : Le fichier modèle '{MODELE_PATH}' est introuvable sur le disque.")
+        config_valide = False
+    else:
+        logging.info(f"✔ Modèle trouvé à l'emplacement : {MODELE_PATH}")
+
+    if not config_valide:
+        logging.error("Arrêt du script : Échec de la validation des prérequis de configuration.")
         return
 
     engine = create_engine(SUPABASE_DB_URI)
