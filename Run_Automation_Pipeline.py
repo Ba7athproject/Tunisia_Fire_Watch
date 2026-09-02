@@ -308,10 +308,10 @@ def run_automated_pipeline():
             'wind_max': meteo['wind_max'],
             'precip_sum': meteo['precip_sum'],
             'ndvi': ndvi,
-            'ndwi': ndwi,
-            'frp': frp_value
+            'ndwi': ndwi
         }])
-        features = features[['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi', 'frp']]
+        # Le modèle ne s'attend plus à recevoir le FRP
+        features = features[['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi']]
 
         # Calcul de la probabilité de risque d'incendie (0 à 100%)
         risque_prob = float(model.predict_proba(features)[:, 1][0]) * 100
