@@ -19,7 +19,10 @@ SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
 
 col_logo, col_title = st.columns([1, 6])
 with col_logo:
-    st.markdown("### **🔍 ba7ath**")
+    if os.path.exists("B_logo.png"):
+        st.image("B_logo.png", use_container_width=True)
+    else:
+        st.markdown("### **🔍 ba7ath**")
 with col_title:
     st.title("🔥 Tunisia Fire Watch : Anticipation des Risques")
 
