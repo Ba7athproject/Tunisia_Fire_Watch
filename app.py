@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import geopandas as gpd
 import pydeck as pdk
 import os
 from dotenv import load_dotenv
@@ -26,7 +25,7 @@ with col_title:
 
 st.markdown("""
 *Plateforme d'investigation numérique et de modélisation prédictive des anomalies thermiques en Tunisie.* 
-Exploitation conjointe des archives **VIIRS**, du climat **Open-Meteo**, de la biomasse **MODIS/Sentinel-2** et de l'IA **XGBoost**.
+Exploitation conjointe des archives **VIIRS**, du climat **Open-Meteo**, de la biomasse **MODIS** et de l'IA **XGBoost**.
 """)
 st.markdown("---")
 
@@ -41,7 +40,7 @@ def get_db_engine():
 
 @st.cache_data(ttl=300)
 def load_realtime_data():
-    """Extraction des détections satellitaires actives depuis PostGIS."""
+    """Extraction des détections satellitaires actives depuis PostGIS (Supabase)."""
     engine = get_db_engine()
     if not engine:
         return pd.DataFrame()
@@ -53,16 +52,10 @@ def load_realtime_data():
 
 @st.cache_data
 def load_prediction_data():
-    """Chargement et optimisation des 103 000+ mailles prédictives pour PyDeck."""
-    fichier_pred = "carte_risques_demain_reel.geojson"
+    """Chargement ultra-rapide des alertes prédictives via format tabulaire (CSV)."""
+    fichier_pred = "carte_risques_demain_reel.csv"
     if os.path.exists(fichier_pred):
-        gdf = gpd.read_file(fichier_pred)
-        # Extraction rapide des coordonnées pour le rendu WebGL
-        gdf['lon'] = gdf.geometry.centroid.x
-        gdf['lat'] = gdf.geometry.centroid.y
-        # Nettoyage de la géométrie lourde pour économiser la RAM du navigateur
-        df = pd.DataFrame(gdf.drop(columns=['geometry']))
-        return df
+        return pd.read_csv(fichier_pred)
     return pd.DataFrame()
 
 @st.cache_data
@@ -74,7 +67,7 @@ def load_historical_data():
     return pd.DataFrame()
 
 # -----------------------------------------------------------------------------
-# 3. Interface d'Investigation : Les 3 Piliers (Temps Réel, Prédiction, Archives)
+# 3. Interface d'Investigation : Les 3 Piliers
 # -----------------------------------------------------------------------------
 tab_pred, tab_realtime, tab_history = st.tabs([
     "🔮 Prédiction des Risques (J+1)", 
@@ -86,34 +79,41 @@ tab_pred, tab_realtime, tab_history = st.tabs([
 # ONGLET 1 : PRÉDICTION DES RISQUES (IA XGBOOST)
 # =============================================================================
 with tab_pred:
-    st.subheader("Cartographie Prédictive des Départs de Feu (Modèle XGBoost)")
+    st.subheader("Cartographie Prédictive des Départs de Feu")
     df_pred = load_prediction_data()
     
     if not df_pred.empty:
-        # Contrôles de filtrage
+        # Contrôles de filtrage interactifs
         st.sidebar.header("🎛️ Filtres Prédictifs")
-        seuil_risque = st.sidebar.slider("Niveau de risque minimal (%)", 30, 100, 60)
+        seuil_risque = st.sidebar.slider("Niveau de risque minimal (%)", 65, 100, 75)
         df_filtre_pred = df_pred[df_pred['risque_prob'] >= seuil_risque].copy()
         
+        # Métriques de synthèse
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Zones critiques détectées", f"{len(df_filtre_pred):,}")
-        col2.metric("Température Max (Zone critique)", f"{df_filtre_pred['t_max'].max():.1f} °C")
-        col3.metric("Vent Max (Rafales)", f"{df_filtre_pred['wind_max'].max():.1f} km/h")
-        col4.metric("Stress Hydrique (NDWI min)", f"{df_filtre_pred['ndwi'].min():.3f}")
+        col1.metric("Zones d'alerte détectées", f"{len(df_filtre_pred):,}")
         
-        # Colorimétrie dynamique : Jaune (Risque modéré) -> Rouge (Risque critique)
+        # Gestion des valeurs maximales en évitant les erreurs si le dataframe est vide
+        max_temp = df_filtre_pred['t_max'].max() if not df_filtre_pred.empty else 0
+        max_wind = df_filtre_pred['wind_max'].max() if not df_filtre_pred.empty else 0
+        min_ndwi = df_filtre_pred['ndwi'].min() if not df_filtre_pred.empty else 0
+        
+        col2.metric("Température Max", f"{max_temp:.1f} °C")
+        col3.metric("Vent Max (Rafales)", f"{max_wind:.1f} km/h")
+        col4.metric("Stress Hydrique Critique", f"{min_ndwi:.3f}")
+        
+        # Colorimétrie dynamique : Jaune -> Orange -> Rouge selon la probabilité
         df_filtre_pred['color'] = df_filtre_pred['risque_prob'].apply(
-            lambda x: [255, int(255 - (x-30)*3.6), 0, 160] if x < 80 else [255, 0, 0, 200]
+            lambda x: [255, 204, 0, 180] if x < 75 else ([255, 102, 0, 200] if x < 85 else [255, 0, 0, 230])
         )
         
-        # Couche ColumnLayer pour représenter l'intensité du risque en 3D
+        # Rendu spatial PyDeck
         layer_pred = pdk.Layer(
             "ColumnLayer",
             data=df_filtre_pred,
             get_position='[lon, lat]',
-            get_elevation='risque_prob * 50', # Élévation proportionnelle au risque
+            get_elevation='risque_prob * 30', # Élévation proportionnelle
             elevation_scale=10,
-            radius=250, # Rayon de 250m correspondant à la maille MODIS/Sentinel
+            radius=400, # Largeur de la colonne pour visibilité
             get_fill_color='color',
             pickable=True,
             auto_highlight=True,
@@ -123,11 +123,16 @@ with tab_pred:
         r_pred = pdk.Deck(
             layers=[layer_pred],
             initial_view_state=view_state,
-            tooltip={"html": "<b>Risque: {risque_prob}%</b><br/>Température: {t_max}°C<br/>Vent: {wind_max} km/h<br/>Végétation (NDVI): {ndvi}"}
+            tooltip={
+                "html": "<b>{niveau_vigilance}</b><br/>"
+                        "Risque : {risque_prob}%<br/>"
+                        "TMax: {t_max}°C | Vent: {wind_max} km/h<br/>"
+                        "NDVI: {ndvi}"
+            }
         )
         st.pydeck_chart(r_pred)
     else:
-        st.info("La carte prédictive de demain n'a pas encore été générée par le pipeline d'automatisation.")
+        st.info("La carte prédictive d'aujourd'hui n'a pas encore été générée. Lancez le script d'inférence.")
 
 # =============================================================================
 # ONGLET 2 : SURVEILLANCE TEMPS RÉEL (FIRMS)
@@ -136,6 +141,7 @@ with tab_realtime:
     df_foyers = load_realtime_data()
     if not df_foyers.empty:
         st.subheader("Anomalies Thermiques Actives (Satellites NASA/NOAA)")
+        # Rayon du cercle basé sur l'intensité du feu (FRP)
         df_foyers['radius'] = df_foyers['frp'].apply(lambda x: min(x * 50, 3000))
         layer_realtime = pdk.Layer(
             "ScatterplotLayer",
@@ -152,10 +158,10 @@ with tab_realtime:
         )
         st.pydeck_chart(r_realtime)
     else:
-        st.info("Aucune anomalie thermique n'est actuellement signalée.")
+        st.info("Aucune anomalie thermique n'est actuellement signalée sur le territoire.")
 
 # =============================================================================
-# ONGLET 3 : ARCHIVES ET BARRAGES (CSV STATISTIQUE)
+# ONGLET 3 : ARCHIVES
 # =============================================================================
 with tab_history:
     st.subheader("Bilan National et Données d'Investigation (2002-2025)")
@@ -175,7 +181,7 @@ with tab_history:
 st.markdown("---")
 with st.expander("⚖️ Méthodologie et Transparence OSINT"):
     st.markdown("""
-    * **Collecte** : Fusion automatisée des archives ouvertes de la **NASA** (VIIRS), des réanalyses climatiques d'**Open-Meteo** (ERA5) et de l'imagerie **MODIS/Sentinel-2**.
+    * **Collecte** : Fusion automatisée des archives ouvertes de la **NASA** (VIIRS), des réanalyses climatiques d'**Open-Meteo** (ERA5) et de l'imagerie **MODIS**.
     * **IA et Biais** : La modélisation prédictive repose sur l'algorithme open-source XGBoost. Afin d'éviter les fuites de données (Target Leakage), les variables thermiques post-incendie (FRP) ont été rigoureusement exclues de l'apprentissage.
     * **Documentation** : Les prédictions n'ont qu'une vocation d'analyse journalistique spatiale et ne se substituent pas aux alertes formelles de l'Observatoire National de l'Agriculture ou de la Protection Civile.
     """)

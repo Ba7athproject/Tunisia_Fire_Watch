@@ -1,69 +1,127 @@
-import pandas as pd
-import geopandas as gpd
-import xgboost as xgb
-import rasterio
-from rasterio.sample import sample_gen
 import logging
+import os
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import rasterio
+import xgboost as xgb
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuration de la journalisation pour la traçabilité de l'investigation
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-def extraire_valeurs_raster(points_geometry, chemin_raster):
-    """Extrait les valeurs réelles d'un fichier GeoTIFF pour une liste de géométries."""
+
+def extraire_valeurs_raster(points_geometry, chemin_raster: str) -> list:
+    """Extrait les valeurs réelles d'un raster GeoTIFF (EPSG:4326)
+    pour une liste de coordonnées géographiques (Points).
+    """
+    if not os.path.exists(chemin_raster):
+        raise FileNotFoundError(f"Le fichier raster est introuvable : {chemin_raster}")
+
     coordonnees = [(point.x, point.y) for point in points_geometry]
     valeurs = []
-    
+
     with rasterio.open(chemin_raster) as src:
-        # L'échantillonnage (sampling) est ultra-rapide, même pour 200 000 points
+        # Échantillonnage spatial rapide via le générateur de rasterio
         for val in src.sample(coordonnees):
-            valeurs.append(val[0])
+            valeurs.append(float(val[0]))
+
     return valeurs
 
-def generer_carte_risques_reelle(fichier_grille, raster_ndvi, raster_ndwi, fichier_modele, fichier_sortie):
-    logging.info(f"Chargement de la grille prévisionnelle : {fichier_grille}")
-    gdf_grille = gpd.read_file(fichier_grille)
-    
-    # 1. Extraction des DONNÉES RÉELLES de végétation
-    logging.info("Croisement spatial avec les images Sentinel-2 réelles...")
-    # On suppose ici que tu as généré deux rasters .tif de la Tunisie pour la quinzaine en cours
+
+def generer_carte_risques_ciblee(
+    fichier_grille: str,
+    raster_ndvi: str,
+    raster_ndwi: str,
+    fichier_modele: str,
+    fichier_sortie: str,
+    seuil_ndvi_min: float = 0.30,
+    seuil_risque_min: float = 65.0
+) -> None:
+    """Filtre la grille territoriale sur les zones de biomasse réelle,
+    calcule les probabilités d'incendie via XGBoost et exporte
+    exclusivement les mailles sous vigilance opérationnelle en format CSV.
+    """
     try:
-        # Les centroïdes des mailles sont utilisés pour extraire la valeur du pixel satellitaire
-        # Projection temporaire en UTM Zone 32N (Tunisie) pour un calcul précis en mètres
+        # 1. Chargement de la grille prévisionnelle
+        logger.info(f"Chargement de la grille : {fichier_grille}")
+        gdf_grille = gpd.read_file(fichier_grille)
+        total_initial = len(gdf_grille)
+
+        # 2. Calcul géodésique des centroïdes (projection métrique UTM 32N pour la Tunisie)
+        logger.info("Calcul des centroïdes des mailles...")
         gdf_proj = gdf_grille.to_crs(epsg=32632)
-        centroides_proj = gdf_proj.geometry.centroid
-        centroides = centroides_proj.to_crs(gdf_grille.crs)
-        gdf_grille['ndvi'] = extraire_valeurs_raster(centroides, raster_ndvi)
-        gdf_grille['ndwi'] = extraire_valeurs_raster(centroides, raster_ndwi)
-    except Exception as e:
-        logging.error(f"Erreur lors de la lecture des rasters satellitaires : {e}")
-        logging.error("Veuillez vous assurer que les fichiers .tif existent et sont dans le même SCR (EPSG:4326).")
-        return
+        centroides = gdf_proj.geometry.centroid.to_crs(gdf_grille.crs)
 
-    # 2. Chargement du modèle XGBoost entraîné
-    modele_xgb = xgb.XGBClassifier()
-    modele_xgb.load_model(fichier_modele)
-    logging.info("✔ Modèle prédictif chargé.")
+        # 3. Extraction des indicateurs satellitaires réels
+        logger.info("Échantillonnage des rasters MODIS (NDVI et NDWI)...")
+        gdf_grille["ndvi"] = extraire_valeurs_raster(centroides, raster_ndvi)
+        gdf_grille["ndwi"] = extraire_valeurs_raster(centroides, raster_ndwi)
 
-    colonnes_predictives = ['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi']
-    X_prediction = gdf_grille[colonnes_predictives].copy().astype(float)
+        # 4. Filtre de biomasse : on exclut les zones sans couvert végétal (déserts, villes)
+        gdf_combustible = gdf_grille[gdf_grille["ndvi"] >= seuil_ndvi_min].copy()
+        logger.info(f"Filtrage biomasse (NDVI >= {seuil_ndvi_min}) : {len(gdf_combustible):,} mailles retenues.")
 
-    # 3. Calcul des probabilités
-    logging.info("Calcul matriciel des probabilités d'incendie (Vérité terrain)...")
-    probabilites = modele_xgb.predict_proba(X_prediction)[:, 1]
-    
-    gdf_grille['risque_prob'] = (probabilites * 100).round(1)
-    
-    # 4. Filtrage des zones à risque
-    gdf_risques = gdf_grille[gdf_grille['risque_prob'] > 30].copy()
-    
-    gdf_risques.to_file(fichier_sortie, driver="GeoJSON")
-    logging.info(f"✔ Carte des risques réels générée : {fichier_sortie}")
+        if gdf_combustible.empty:
+            logger.warning("Aucune maille ne présente un couvert végétal suffisant.")
+            return
+
+        # 5. Inférence du modèle XGBoost
+        logger.info(f"Chargement du modèle XGBoost : {fichier_modele}")
+        modele_xgb = xgb.XGBClassifier()
+        modele_xgb.load_model(fichier_modele)
+
+        features_cols = ["t_max", "h_mean", "wind_max", "precip_sum", "ndvi", "ndwi"]
+        X_pred = gdf_combustible[features_cols].copy().astype(float)
+
+        logger.info("Calcul des probabilités de départ de feu...")
+        probabilites = modele_xgb.predict_proba(X_pred)[:, 1]
+        gdf_combustible["risque_prob"] = (probabilites * 100).round(1)
+
+        # 6. Seuils de vigilance opérationnelle
+        gdf_alertes = gdf_combustible[gdf_combustible["risque_prob"] >= seuil_risque_min].copy()
+
+        conditions = [
+            (gdf_alertes["risque_prob"] >= 85.0),
+            (gdf_alertes["risque_prob"] >= 75.0) & (gdf_alertes["risque_prob"] < 85.0),
+            (gdf_alertes["risque_prob"] >= 65.0) & (gdf_alertes["risque_prob"] < 75.0)
+        ]
+        classes_vigilance = ["Alerte Rouge (Extrême)", "Alerte Orange (Élevé)", "Vigilance Jaune (Modéré)"]
+        gdf_alertes["niveau_vigilance"] = np.select(conditions, classes_vigilance, default="Indéterminé")
+
+        logger.info(f"Foyers potentiels retenus après seuillage : {len(gdf_alertes):,} mailles.")
+
+        # 7. Export CSV ultra-rapide pour Streamlit (on abandonne le GeoJSON lourd)
+        logger.info("Conversion des géométries en points simples (CSV) pour le tableau de bord...")
+        
+        # Extraction précise des coordonnées géographiques
+        gdf_alertes_proj = gdf_alertes.to_crs(epsg=32632)
+        centroides_finaux = gdf_alertes_proj.geometry.centroid.to_crs(gdf_alertes.crs)
+        
+        gdf_alertes["lon"] = centroides_finaux.x
+        gdf_alertes["lat"] = centroides_finaux.y
+        
+        # Suppression du polygone géométrique et sauvegarde tabulaire
+        df_export = pd.DataFrame(gdf_alertes.drop(columns=["geometry"]))
+        df_export.to_csv(fichier_sortie, index=False)
+        
+        logger.info(f"✔ Carte allégée générée avec succès : {fichier_sortie}")
+
+    except Exception as exc:
+        logger.error(f"Échec du pipeline prédictif : {exc}", exc_info=True)
+        raise
+
 
 if __name__ == "__main__":
-    # Noms des fichiers requis pour la mise en production
-    generer_carte_risques_reelle(
+    generer_carte_risques_ciblee(
         fichier_grille="grille_meteo_previsionnelle_20260901.geojson",
-        raster_ndvi="tunisie_ndvi_actuel.tif",  # Fichier réel à télécharger 2 fois par mois
-        raster_ndwi="tunisie_ndwi_actuel.tif",  # Fichier réel à télécharger 2 fois par mois
+        raster_ndvi="tunisie_ndvi_actuel.tif",
+        raster_ndwi="tunisie_ndwi_actuel.tif",
         fichier_modele="modele_xgboost_incendies_tunisie.json",
-        fichier_sortie="carte_risques_demain_reel.geojson"
+        fichier_sortie="carte_risques_demain_reel.csv", # Format CSV exigé ici
+        seuil_ndvi_min=0.30,
+        seuil_risque_min=65.0
     )
