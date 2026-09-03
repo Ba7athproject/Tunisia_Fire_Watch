@@ -36,4 +36,23 @@ jobs:
 
       - name: Run Data Collection & Prediction Pipeline
         run: |
+          # 1. Collecte automatisée des anomalies thermiques actives (FIRMS) et données météo
           python Run_Automation_Pipeline.py
+          
+          # 2. Inférence du modèle XGBoost et export CSV des zones en alerte
+          python vegetation_modele_reel.py
+
+      - name: Commit et Push de la carte prédictive allégée
+        run: |
+          # Configuration de l'identité du bot pour maintenir la transparence des logs
+          git config --global user.name "Pipeline ba7ath"
+          git config --global user.email "bot@ba7ath.org"
+          
+          # Indexation exclusive de la matrice de risques allégée
+          git add carte_risques_demain_reel.csv
+          
+          # Validation silencieuse (évite que le pipeline plante si aucun changement n'est détecté)
+          git commit -m "🤖 Mise à jour automatique de la matrice de risque (XGBoost)" || echo "Aucune modification de la carte détectée"
+          
+          # Envoi des données vers le dépôt pour déclencher l'actualisation de l'interface Streamlit
+          git push
