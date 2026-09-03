@@ -1,206 +1,182 @@
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
-from sqlalchemy import create_engine
 import pydeck as pdk
 import os
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 # -----------------------------------------------------------------------------
-# Configuration de la page Streamlit
+# 1. Configuration de la Plateforme ba7ath
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Tunisia Fire Watch | ba7ath OSINT",
-    page_icon="🔥",
+    page_title="Tunisia Fire Watch | Investigation & Prédiction",
+    page_icon="🔍",
     layout="wide"
 )
 
 load_dotenv()
 SUPABASE_DB_URI = os.getenv("SUPABASE_DB_URI")
 
-# -----------------------------------------------------------------------------
-# En-tête de Marque (Logo Ba7ath & Style Journalistique)
-# -----------------------------------------------------------------------------
-col_logo, col_title = st.columns([1, 5])
+col_logo, col_title = st.columns([1, 6])
 with col_logo:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", use_container_width=True)
-    else:
-        st.markdown("### **🔍 ba7ath**")
+    st.markdown("### **🔍 ba7ath**")
 with col_title:
-    st.title("🔥 Tunisia Fire Watch : Veille et Analyse Territoriale des Incendies")
+    st.title("🔥 Tunisia Fire Watch : Anticipation des Risques")
 
 st.markdown("""
-*Plateforme d'investigation numérique automatisée dédiée à la surveillance des anomalies thermiques en Tunisie.* 
-Croisement géospatial open-source : **NASA FIRMS** (VIIRS 375m), imagerie optique **Sentinel-2** (Microsoft Planetary Computer) et modélisation prédictive par **XGBoost**.
+*Plateforme d'investigation numérique et de modélisation prédictive des anomalies thermiques en Tunisie.* 
+Exploitation conjointe des archives **VIIRS**, du climat **Open-Meteo**, de la biomasse **MODIS/Sentinel-2** et de l'IA **XGBoost**.
 """)
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# Connexion à Supabase et Récupération des Données
+# 2. Moteurs de Données (Mise en Cache pour Haute Performance)
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def get_db_engine():
     if not SUPABASE_DB_URI:
-        st.error("❌ ERREUR CRITIQUE : La variable SUPABASE_DB_URI est introuvable.")
         return None
     return create_engine(SUPABASE_DB_URI)
 
-engine = get_db_engine()
-
 @st.cache_data(ttl=300)
-def load_data():
+def load_realtime_data():
+    """Extraction des détections satellitaires actives depuis PostGIS."""
+    engine = get_db_engine()
     if not engine:
         return pd.DataFrame()
     try:
-        query = """
-            SELECT cell_id, acq_date, latitude, longitude, frp, t_max, h_mean, 
-                   wind_max, ndvi, ndwi, risque_prob, confidence, gouvernorat 
-            FROM foyers_actifs 
-            ORDER BY acq_date DESC;
-        """
+        query = "SELECT cell_id, acq_date, latitude, longitude, frp, confidence, gouvernorat FROM foyers_actifs ORDER BY acq_date DESC;"
         return pd.read_sql(query, engine)
-    except Exception as e:
-        st.error(f"Erreur lors de la récupération des données depuis Supabase : {e}")
+    except Exception:
         return pd.DataFrame()
 
-df_foyers = load_data()
+@st.cache_data
+def load_prediction_data():
+    """Chargement et optimisation des 103 000+ mailles prédictives pour PyDeck."""
+    fichier_pred = "carte_risques_demain_reel.geojson"
+    if os.path.exists(fichier_pred):
+        gdf = gpd.read_file(fichier_pred)
+        # Extraction rapide des coordonnées pour le rendu WebGL
+        gdf['lon'] = gdf.geometry.centroid.x
+        gdf['lat'] = gdf.geometry.centroid.y
+        # Nettoyage de la géométrie lourde pour économiser la RAM du navigateur
+        df = pd.DataFrame(gdf.drop(columns=['geometry']))
+        return df
+    return pd.DataFrame()
 
-if df_foyers.empty:
-    st.warning("⚠️ Aucun foyer thermique enregistré dans la base de données pour le moment.")
-else:
-    # S'assurer que acq_date est au format datetime
-    df_foyers['acq_date'] = pd.to_datetime(df_foyers['acq_date'])
+@st.cache_data
+def load_historical_data():
+    """Chargement de l'historique national."""
+    csv_path = "historique_incendies_propre.csv"
+    if os.path.exists(csv_path):
+        return pd.read_csv(csv_path)
+    return pd.DataFrame()
 
-    # -----------------------------------------------------------------------------
-    # Barre latérale : Filtres d'Investigation & Approche Historique
-    # -----------------------------------------------------------------------------
-    st.sidebar.header("🔍 Filtres d'Investigation")
-    
-    # 1. Filtre par Gouvernorat (issu du croisement PostGIS)
-    gouvernorats_disponibles = sorted(df_foyers['gouvernorat'].dropna().unique().tolist())
-    selected_gouvernorat = st.sidebar.selectbox(
-        "Filtrer par Gouvernorat", 
-        options=["Tous les gouvernorats"] + gouvernorats_disponibles
-    )
-    
-    # 2. Filtre sur le risque minimal prédit par l'IA
-    seuil_risque = st.sidebar.slider("Seuil de risque minimal (%)", 0, 100, 30)
-    
-    # 3. Approche Historique : Filtre temporel
-    min_date = df_foyers['acq_date'].min().date()
-    max_date = df_foyers['acq_date'].max().date()
-    
-    st.sidebar.markdown("### ⏳ Approche Historique")
-    date_range = st.sidebar.date_input(
-        "Période d'analyse",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
+# -----------------------------------------------------------------------------
+# 3. Interface d'Investigation : Les 3 Piliers (Temps Réel, Prédiction, Archives)
+# -----------------------------------------------------------------------------
+tab_pred, tab_realtime, tab_history = st.tabs([
+    "🔮 Prédiction des Risques (J+1)", 
+    "🔴 Surveillance Temps Réel", 
+    "📚 Archives Nationales"
+])
 
-    # Application des filtres
-    df_filtered = df_foyers[df_foyers['risque_prob'] >= seuil_risque]
+# =============================================================================
+# ONGLET 1 : PRÉDICTION DES RISQUES (IA XGBOOST)
+# =============================================================================
+with tab_pred:
+    st.subheader("Cartographie Prédictive des Départs de Feu (Modèle XGBoost)")
+    df_pred = load_prediction_data()
     
-    if selected_gouvernorat != "Tous les gouvernorats":
-        df_filtered = df_filtered[df_filtered['gouvernorat'] == selected_gouvernorat]
+    if not df_pred.empty:
+        # Contrôles de filtrage
+        st.sidebar.header("🎛️ Filtres Prédictifs")
+        seuil_risque = st.sidebar.slider("Niveau de risque minimal (%)", 30, 100, 60)
+        df_filtre_pred = df_pred[df_pred['risque_prob'] >= seuil_risque].copy()
         
-    if len(date_range) == 2:
-        start_d, end_d = date_range
-        df_filtered = df_filtered[
-            (df_filtered['acq_date'].dt.date >= start_d) & 
-            (df_filtered['acq_date'].dt.date <= end_d)
-        ]
-
-    # -----------------------------------------------------------------------------
-    # Indicateurs clés (KPIs)
-    # -----------------------------------------------------------------------------
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Foyers Sélectionnés", len(df_filtered))
-    col2.metric("Gouvernorats Impactés", df_filtered['gouvernorat'].nunique() if not df_filtered.empty else 0)
-    col3.metric("Température Max Moyenne", f"{df_filtered['t_max'].mean():.1f} °C" if not df_filtered.empty else "N/A")
-    col4.metric("FRP (Puissance Radiative) Max", f"{df_filtered['frp'].max():.1f} MW" if not df_filtered.empty else "N/A")
-
-    st.markdown("---")
-
-    # -----------------------------------------------------------------------------
-    # Visualisation Cartographique interactive (PyDeck)
-    # -----------------------------------------------------------------------------
-    st.subheader("🗺️ Cartographie des Foyers Thermiques et Risques Territoriaux")
-    
-    if not df_filtered.empty:
-        def get_color(prob):
-            if prob > 75:
-                return [200, 30, 0, 190]   # Rouge critique
-            elif prob > 45:
-                return [255, 140, 0, 190] # Orange modéré
-            else:
-                return [50, 205, 50, 190]  # Vert faible
-
-        df_filtered['color'] = df_filtered['risque_prob'].apply(get_color)
-        df_filtered['radius'] = df_filtered['frp'].apply(lambda x: max(350, min(x * 120, 3500)))
-
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_filtered,
-            get_position='[longitude, latitude]',
-            get_color='color',
-            get_radius='radius',
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Zones critiques détectées", f"{len(df_filtre_pred):,}")
+        col2.metric("Température Max (Zone critique)", f"{df_filtre_pred['t_max'].max():.1f} °C")
+        col3.metric("Vent Max (Rafales)", f"{df_filtre_pred['wind_max'].max():.1f} km/h")
+        col4.metric("Stress Hydrique (NDWI min)", f"{df_filtre_pred['ndwi'].min():.3f}")
+        
+        # Colorimétrie dynamique : Jaune (Risque modéré) -> Rouge (Risque critique)
+        df_filtre_pred['color'] = df_filtre_pred['risque_prob'].apply(
+            lambda x: [255, int(255 - (x-30)*3.6), 0, 160] if x < 80 else [255, 0, 0, 200]
+        )
+        
+        # Couche ColumnLayer pour représenter l'intensité du risque en 3D
+        layer_pred = pdk.Layer(
+            "ColumnLayer",
+            data=df_filtre_pred,
+            get_position='[lon, lat]',
+            get_elevation='risque_prob * 50', # Élévation proportionnelle au risque
+            elevation_scale=10,
+            radius=250, # Rayon de 250m correspondant à la maille MODIS/Sentinel
+            get_fill_color='color',
             pickable=True,
             auto_highlight=True,
-            opacity=0.85
         )
-
-        view_state = pdk.ViewState(
-            latitude=34.0,
-            longitude=9.0,
-            zoom=6,
-            pitch=25,
-        )
-
-        r = pdk.Deck(
-            layers=[layer],
+        
+        view_state = pdk.ViewState(latitude=35.0, longitude=9.5, zoom=6, pitch=45)
+        r_pred = pdk.Deck(
+            layers=[layer_pred],
             initial_view_state=view_state,
-            tooltip={
-                "html": "<b>Date :</b> {acq_date}<br/>"
-                        "<b>Gouvernorat :</b> {gouvernorat}<br/>"
-                        "<b>Risque IA :</b> {risque_prob}%<br/>"
-                        "<b>FRP :</b> {frp} MW<br/>"
-                        "<b>Température :</b> {t_max} °C",
-                "style": {"backgroundColor": "#111", "color": "#fff", "border": "1px solid #444"}
-            }
+            tooltip={"html": "<b>Risque: {risque_prob}%</b><br/>Température: {t_max}°C<br/>Vent: {wind_max} km/h<br/>Végétation (NDVI): {ndvi}"}
         )
-
-        st.pydeck_chart(r)
+        st.pydeck_chart(r_pred)
     else:
-        st.info("Aucun foyer ne correspond aux filtres sélectionnés.")
+        st.info("La carte prédictive de demain n'a pas encore été générée par le pipeline d'automatisation.")
 
-    # -----------------------------------------------------------------------------
-    # Approche Historique & Graphique d'Évolution
-    # -----------------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("📈 Évolution Historique et Chronologie des Détections")
-    if not df_filtered.empty:
-        df_timeline = df_filtered.set_index('acq_date').resample('D').size().reset_index(name='nombre_foyers')
-        st.line_chart(df_timeline.set_index('acq_date'))
+# =============================================================================
+# ONGLET 2 : SURVEILLANCE TEMPS RÉEL (FIRMS)
+# =============================================================================
+with tab_realtime:
+    df_foyers = load_realtime_data()
+    if not df_foyers.empty:
+        st.subheader("Anomalies Thermiques Actives (Satellites NASA/NOAA)")
+        df_foyers['radius'] = df_foyers['frp'].apply(lambda x: min(x * 50, 3000))
+        layer_realtime = pdk.Layer(
+            "ScatterplotLayer",
+            data=df_foyers,
+            get_position='[longitude, latitude]',
+            get_color='[255, 69, 0, 200]',
+            get_radius='radius',
+            pickable=True
+        )
+        r_realtime = pdk.Deck(
+            layers=[layer_realtime],
+            initial_view_state=pdk.ViewState(latitude=34.0, longitude=9.0, zoom=5.5),
+            tooltip={"html": "<b>{gouvernorat}</b><br/>FRP: {frp} MW<br/>Confiance: {confidence}"}
+        )
+        st.pydeck_chart(r_realtime)
     else:
-        st.write("Données insuffisantes pour afficher l'historique sur la période.")
+        st.info("Aucune anomalie thermique n'est actuellement signalée.")
 
-    # -----------------------------------------------------------------------------
-    # Tableau de Données Détaillées & Transparence OSINT
-    # -----------------------------------------------------------------------------
-    st.markdown("---")
-    with st.expander("📊 Consulter les données brutes et métriques d'investigation"):
-        st.dataframe(df_filtered[['acq_date', 'gouvernorat', 'latitude', 'longitude', 'risque_prob', 'frp', 't_max', 'h_mean', 'wind_max', 'confidence']])
+# =============================================================================
+# ONGLET 3 : ARCHIVES ET BARRAGES (CSV STATISTIQUE)
+# =============================================================================
+with tab_history:
+    st.subheader("Bilan National et Données d'Investigation (2002-2025)")
+    df_historique = load_historical_data()
+    if not df_historique.empty:
+        df_yearly = df_historique.groupby('annee')[['nombre', 'superficie_ha']].sum().reset_index()
+        col_c1, col_c2 = st.columns(2)
+        col_c1.bar_chart(df_yearly.set_index('annee')['nombre'], color="#ff4b4b")
+        col_c2.line_chart(df_yearly.set_index('annee')['superficie_ha'], color="#ffa500")
+        st.dataframe(df_historique.groupby('gouvernorat')['superficie_ha'].sum().sort_values(ascending=False).reset_index(), use_container_width=True)
+    else:
+        st.warning("Fichier historique introuvable.")
 
 # -----------------------------------------------------------------------------
-# Mentions Légales & Pied de page (Projet ba7ath)
+# 4. Transparence OSINT & Mentions Légales
 # -----------------------------------------------------------------------------
 st.markdown("---")
-st.markdown("""
-### ⚖️ Méthodologie et Mentions Légales (Projet Ba7ath)
-* **Sources de données** : Ce tableau de bord exploite des données publiques en temps quasi-réel issues de la **NASA FIRMS** (capteur VIIRS SNPP 375m), de l'API météorologique **WeatherAPI**, et de l'imagerie satellitaire optique **Sentinel-2** (via Microsoft Planetary Computer).
-* **Éthique & Transparence** : Les méthodologies de collecte respectent strictement les conditions d'utilisation des API ouvertes. Aucune donnée privée ou sensible n'est manipulée.
-* **Avertissement** : Les scores de probabilité de risque d'incendie sont générés par un modèle d'intelligence artificielle prédictif (`XGBoost`) à des fins journalistiques, d'alerte citoyenne et de recherche. Ils ne se substituent pas aux communiqués officiels de la Protection Civile tunisienne ou des autorités forestières compétentes.
-""")
-st.markdown("<p style='text-align: center; color: gray;'>Développé pour l'investigation numérique et le journalisme de données — Projet Ba7ath (2026)</p>", unsafe_allow_html=True)
+with st.expander("⚖️ Méthodologie et Transparence OSINT"):
+    st.markdown("""
+    * **Collecte** : Fusion automatisée des archives ouvertes de la **NASA** (VIIRS), des réanalyses climatiques d'**Open-Meteo** (ERA5) et de l'imagerie **MODIS/Sentinel-2**.
+    * **IA et Biais** : La modélisation prédictive repose sur l'algorithme open-source XGBoost. Afin d'éviter les fuites de données (Target Leakage), les variables thermiques post-incendie (FRP) ont été rigoureusement exclues de l'apprentissage.
+    * **Documentation** : Les prédictions n'ont qu'une vocation d'analyse journalistique spatiale et ne se substituent pas aux alertes formelles de l'Observatoire National de l'Agriculture ou de la Protection Civile.
+    """)
+st.markdown("<p style='text-align: center; color: gray;'>Développé pour l'investigation numérique et le datajournalisme — Projet ba7ath (2026)</p>", unsafe_allow_html=True)
