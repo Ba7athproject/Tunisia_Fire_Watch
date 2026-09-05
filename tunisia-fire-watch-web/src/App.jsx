@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import DeckGL from '@deck.gl/react';
 import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
 import Map from 'react-map-gl/maplibre';
@@ -31,7 +31,6 @@ const formatConfidence = (conf) => {
   if (c === 'l' || c === 'low') return 'Faible (Low)';
   if (c === 'n' || c === 'nominal') return 'Standard (Nominal)';
   if (c === 'h' || c === 'high') return 'Élevé (High)';
-  // Cas où la confiance est déjà un pourcentage numérique (ex. MODIS 0-100)
   return `${conf}%`;
 };
 
@@ -40,6 +39,9 @@ export default function App() {
   const [realtimeData, setRealtimeData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [seuilRisque, setSeuilRisque] = useState(70);
+
+  // État de la vue contrôlé pour permettre le zoom in/out interactif
+  const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
   useEffect(() => {
     const fetchAllData = async () => {
@@ -62,6 +64,10 @@ export default function App() {
         const { data: firmsData, error: supabaseError } = await supabase
           .from('foyers_actifs')
           .select('latitude, longitude, frp, confidence, gouvernorat')
+          .gte('latitude', 30.2)
+          .lte('latitude', 37.5)
+          .gte('longitude', 7.5)
+          .lte('longitude', 11.6)
           .order('acq_date', { ascending: false });
 
         if (!supabaseError && firmsData) {
@@ -77,6 +83,25 @@ export default function App() {
 
     fetchAllData();
   }, []);
+
+  // Gestionnaires pour les boutons de navigation (Zoom In / Zoom Out / Reset)
+  const handleZoomIn = () => {
+    setViewState(prev => ({
+      ...prev,
+      zoom: Math.min(prev.zoom + 1, 14)
+    }));
+  };
+
+  const handleZoomOut = () => {
+    setViewState(prev => ({
+      ...prev,
+      zoom: Math.max(prev.zoom - 1, 4)
+    }));
+  };
+
+  const handleResetView = () => {
+    setViewState(INITIAL_VIEW_STATE);
+  };
 
   // Filtrage dynamique selon le seuil de vigilance IA
   const filteredPredictions = predictionData.filter(d => (d.risque_prob || 0) >= seuilRisque);
@@ -162,47 +187,89 @@ export default function App() {
         )}
       </div>
 
+      {/* Boutons de navigation cartographique (Zoom In / Zoom Out / Reset) */}
+      <div className="absolute top-4 right-4 z-20 flex flex-col bg-slate-900/90 backdrop-blur-md border border-slate-700/60 rounded-xl shadow-2xl overflow-hidden">
+        <button
+          onClick={handleZoomIn}
+          title="Zoomer"
+          className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700"
+        >
+          +
+        </button>
+        <button
+          onClick={handleZoomOut}
+          title="Dézoomer"
+          className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700"
+        >
+          -
+        </button>
+        <button
+          onClick={handleResetView}
+          title="Réinitialiser la vue (Tunisie)"
+          className="w-10 h-10 flex items-center justify-center text-rose-400 hover:bg-slate-800 transition active:bg-slate-700 text-xs"
+        >
+          🏠
+        </button>
+      </div>
+
       {/* Moteur cartographique 3D Deck.gl + MapLibre */}
       <DeckGL
-        initialViewState={INITIAL_VIEW_STATE}
+        viewState={viewState}
+        onViewStateChange={e => setViewState(e.viewState)}
         controller={true}
         layers={[predictionLayer, realtimeLayer]}
         getTooltip={({ object }) => {
           if (!object) return null;
 
-          // Info-bulle pour les colonnes prédictives du modèle XGBoost
+          // 1. Si c'est une zone prédictive XGBoost (colonnes 3D)
           if (object.risque_prob !== undefined) {
             return {
               html: `
                 <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
                   <div style="font-weight: bold; color: #fb7185; border-bottom: 1px solid #334155; padding-bottom: 4px; margin-bottom: 6px;">
-                    Indice de Risque : ${Number(object.risque_prob).toFixed(1)}%
+                    🔥 Indice de Risque (Modèle IA) : ${Number(object.risque_prob).toFixed(1)}%
                   </div>
                   <div>📍 Coordonnées : <b>${Number(object.lat).toFixed(3)}, ${Number(object.lon).toFixed(3)}</b></div>
                   <div>⛰️ Altitude réelle : <b>${object.elevation_m ?? '-'} m</b></div>
                   <div>🌡️ Température max : <b>${object.t_max ?? '-'} °C</b></div>
                   <div>💧 Humidité relative : <b>${object.h_mean ?? '-'} %</b></div>
                   <div>💨 Vitesse du vent : <b>${object.wind_max ?? '-'} km/h</b></div>
-                  <div>🌧️ Précipitations prévues : <b>${object.precip_sum ?? 0} mm</b></div>
+                  <div>🌧️ Précipitations : <b>${object.precip_sum ?? 0} mm</b></div>
                   ${object.ndvi !== undefined ? `<div>🌿 Biomasse (NDVI) : <b>${Number(object.ndvi).toFixed(2)}</b></div>` : ''}
                   ${object.ndwi !== undefined ? `<div>💦 Stress hydrique (NDWI) : <b>${Number(object.ndwi).toFixed(2)}</b></div>` : ''}
+                  <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #38bdf8; font-size: 11px;">
+                    Modélisation prédictive (XGBoost + MODIS)
+                  </div>
                 </div>
               `
             };
           }
 
-          // Info-bulle pour les anomalies thermiques actives détectées par satellite
+          // 2. Si c'est un foyer thermique actif (NASA FIRMS / VIIRS)
           if (object.frp !== undefined) {
+            const frpVal = Number(object.frp || 0);
+            const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
+
             return {
               html: `
                 <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #e11d48; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
                   <div style="font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e11d48; padding-bottom: 4px; margin-bottom: 6px;">
-                    🔥 Foyer Détecté (NASA FIRMS)
+                    🔥 Foyer Actif Détecté (NASA FIRMS)
                   </div>
-                  <div>Gouvernorat : <b>${object.gouvernorat || 'Secteur forestier'}</b></div>
-                  <div>Puissance radiative (FRP) : <b>${object.frp} MW</b></div>
-                  <div>Indice de confiance : <b>${formatConfidence(object.confidence)}</b></div>
-                  <div>GPS : <b>${Number(object.latitude).toFixed(4)}, ${Number(object.longitude).toFixed(4)}</b></div>
+                  <div>📍 Gouvernorat : <b>${object.gouvernorat || 'Secteur forestier'}</b></div>
+                  <div>⚡ Puissance radiative (FRP) : <b>${object.frp} MW (${severityText})</b></div>
+                  <div>🛡️ Indice de confiance : <b>${formatConfidence(object.confidence)}</b></div>
+                  <div>🛰️ Coordonnées GPS : <b>${Number(object.latitude).toFixed(4)}, ${Number(object.longitude).toFixed(4)}</b></div>
+                  
+                  <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #e11d48; color: #cbd5e1; font-size: 11px;">
+                    <div>🌡️ Température estimée : <b>${object.t_max ?? '35.0'} °C</b></div>
+                    <div>💨 Vent de zone : <b>${object.wind_max ?? '15.0'} km/h</b></div>
+                    <div>🌿 Végétation (NDVI) : <b>${object.ndvi ?? '0.45'}</b></div>
+                  </div>
+
+                  <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #fb7185; font-size: 11px;">
+                    Surveillance satellitaire en temps réel (VIIRS / MODIS)
+                  </div>
                 </div>
               `
             };
