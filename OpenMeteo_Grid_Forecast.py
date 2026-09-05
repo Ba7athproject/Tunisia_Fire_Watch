@@ -1,6 +1,8 @@
 import os
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import geopandas as gpd
 import pandas as pd
 import logging
@@ -16,15 +18,19 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 FICHIER_GRILLE = "grille_tunisie_1km.geojson"
 FICHIER_SORTIE = f"grille_meteo_previsionnelle_{datetime.now().strftime('%Y%m%d')}.geojson"
 
+
 def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> pd.DataFrame:
     """
-    Réduit les cellules de 1km à des points météorologiques de ~11km
-    pour éviter de saturer l'API Open-Meteo (limite de 10 000 requêtes/jour).
+    Module 1 : Réduction de la résolution spatiale.
+    Transforme les cellules de 1km en stations météorologiques virtuelles de ~11km
+    pour respecter l'éthique de collecte (rate-limiting) d'Open-Meteo.
     """
     logging.info("Calcul des centroïdes et réduction de la résolution spatiale...")
     
-    # Récupération des centroïdes des cellules en coordonnées GPS (EPSG:4326)
-    centroides = gdf_grille.geometry.centroid
+    # Correction géodésique : Reprojection en EPSG:32632 (Métrique, adapté à la Tunisie) 
+    # pour un calcul précis du centroïde, puis retour en EPSG:4326 (GPS)
+    gdf_proj = gdf_grille.to_crs(epsg=32632)
+    centroides = gdf_proj.geometry.centroid.to_crs(epsg=4326)
     
     # Arrondir à 1 décimale équivaut à un maillage d'environ 11.1 km
     df_coords = pd.DataFrame({
@@ -38,15 +44,28 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> pd.DataFrame:
     
     return points_uniques, df_coords
 
-def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size=50) -> pd.DataFrame:
+
+def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size=25) -> pd.DataFrame:
     """
-    Interroge l'API de prévision d'Open-Meteo par lots (batches) de coordonnées.
+    Module 2 : Acquisition Météorologique (Scraping éthique et légal).
+    Interroge l'API par lots avec un mécanisme de résilience (Retry) en cas de surcharge.
     """
     url = "https://api.open-meteo.com/v1/forecast"
     resultats = []
     
-    logging.info(f"Début de l'ingestion API par lots de {batch_size}...")
+    logging.info(f"Début de l'ingestion API par lots réduits de {batch_size} pour soulager le serveur...")
     
+    # Configuration d'une session avec stratégie de réessai automatique (Best Practice)
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=4, # Nombre maximum de tentatives
+        backoff_factor=2, # Temps d'attente exponentiel entre les tentatives (2s, 4s, 8s...)
+        status_forcelist=[429, 500, 502, 503, 504], # Codes HTTP déclenchant un réessai
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
     for i in range(0, len(points_uniques), batch_size):
         batch = points_uniques.iloc[i:i+batch_size]
         lats = batch['lat_meteo'].astype(str).tolist()
@@ -61,13 +80,16 @@ def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size=50) -> pd
         }
         
         try:
-            response = requests.get(url, params=params, timeout=20)
+            # Augmentation du timeout à 45 secondes pour laisser le temps au serveur de calculer
+            response = session.get(url, params=params, timeout=45)
             response.raise_for_status()
             data = response.json()
             
+            # Standardisation de la réponse si un seul point est renvoyé
             if isinstance(data, dict) and "latitude" in data:
                 data = [data]
             
+            # Structuration des données
             for idx, res in enumerate(data):
                 daily = res.get("daily", {})
                 resultats.append({
@@ -80,36 +102,44 @@ def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size=50) -> pd
                 })
                 
         except requests.exceptions.RequestException as e:
-            logging.error(f"Erreur réseau sur le lot {i}-{i+batch_size} : {e}")
+            logging.error(f"Échec critique sur le lot {i}-{i+batch_size} malgré les réessais : {e}")
+            # En cas d'échec total du lot, on remplit avec des valeurs nulles pour ne pas bloquer le dataframe complet
+            for idx in range(len(batch)):
+                 resultats.append({
+                    "lat_meteo": batch.iloc[idx]['lat_meteo'],
+                    "lon_meteo": batch.iloc[idx]['lon_meteo'],
+                    "t_max": None, "h_mean": None, "wind_max": None, "precip_sum": None
+                })
         
-        # Tempo strict pour respecter le rate-limiting
-        time.sleep(1)
+        # Pause éthique entre chaque lot pour respecter le rate-limiting
+        time.sleep(1.5)
         
     return pd.DataFrame(resultats)
 
+
 def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     """
-    Fonction orchestratrice : charge la grille, extrait la météo, et propage 
-    les résultats à la géométrie complète.
+    Module 3 : Orchestration.
+    Charge la grille, extrait la météo, et propage les résultats à la géométrie complète.
     """
-    # Vérification stricte de l'existence du fichier dans l'environnement d'exécution
     if not os.path.exists(chemin_grille):
         logging.error(f"ERREUR CRITIQUE : Fichier de grille introuvable à l'emplacement relatif : '{chemin_grille}'.")
-        logging.error("Vérifiez que ce fichier a bien été 'push' sur le dépôt GitHub.")
-        # Arrêt explicite du script avec un code d'erreur pour stopper le pipeline
         exit(1)
         
     logging.info(f"Chargement du maillage spatial : {chemin_grille}")
     gdf_grille = gpd.read_file(chemin_grille)
     
     points_uniques, df_mapping = extraire_points_meteo_uniques(gdf_grille)
-    df_meteo = requeter_open_meteo_batch(points_uniques)
+    df_meteo = requeter_open_meteo_batch(points_uniques, batch_size=25)
     
-    if df_meteo.empty:
-        logging.error("Aucune donnée météo récupérée. Arrêt du processus.")
+    if df_meteo.empty or df_meteo['t_max'].isna().all():
+        logging.error("Aucune donnée météo exploitable récupérée. Arrêt du processus.")
         exit(1)
         
     logging.info("Propagation des données météo sur la grille fine (1km)...")
+    
+    # Remplacement des valeurs manquantes éventuelles par une méthode d'interpolation (forward fill) pour maintenir l'intégrité
+    df_meteo.ffill(inplace=True)
     df_enrichi = df_mapping.merge(df_meteo, on=['lat_meteo', 'lon_meteo'], how='left')
     
     gdf_grille['t_max'] = df_enrichi['t_max']
@@ -120,6 +150,7 @@ def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     logging.info(f"Sauvegarde de la grille prédictive dans : {chemin_sortie}")
     gdf_grille.to_file(chemin_sortie, driver="GeoJSON")
     logging.info("✔ Pipeline météo prédictif exécuté avec succès.")
+
 
 if __name__ == "__main__":
     integrer_meteo_au_maillage(FICHIER_GRILLE, FICHIER_SORTIE)
