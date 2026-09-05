@@ -21,7 +21,7 @@ FICHIER_SORTIE = f"grille_meteo_previsionnelle_{datetime.now().strftime('%Y%m%d'
 def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
     """
     Module 1 : Réduction de la résolution spatiale avec filtre géographique strict.
-    Exclut le sud désertique pour diviser la charge réseau par 3.
+    Exclut le sud désertique pour diviser la charge réseau.
     """
     logging.info("Calcul des centroïdes et réduction de la résolution spatiale...")
     
@@ -34,10 +34,7 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
         'lon_meteo': np.round(centroides.x, 1)
     })
     
-    # ---------------------------------------------------------
-    # FILTRE OSINT : Conservation exclusive du Nord et de la Dorsale
-    # On élimine tout ce qui est en dessous de 34.2°N (Gafsa/Sfax/Sud)
-    # ---------------------------------------------------------
+    # Filtre géographique : Nord et Dorsale uniquement
     taille_avant = len(df_coords)
     df_coords = df_coords[df_coords['lat_meteo'] >= 34.2].copy()
     taille_apres = len(df_coords)
@@ -52,20 +49,20 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
 
 def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5) -> pd.DataFrame:
     """
-    Module 2A : Interroge l'API Open-Meteo Elevation par ultra-petits lots (5 points) 
-    pour éviter les erreurs d'URL trop longue (HTTP 414) et garantir l'extraction.
+    Module 2A : Interroge l'API Open-Meteo Elevation par ultra-petits lots (5 points).
+    Évite les erreurs 414 (URI Too Long) et garantit la stabilité de l'extraction.
     """
     url = "https://api.open-meteo.com/v1/elevation"
     altitudes_totales = []
 
-    logging.info(f"Début de l'extraction topographique réelle pour {len(points_uniques)} points...")
+    logging.info(f"Début de l'extraction topographique réelle pour {len(points_uniques)} points (lots de {batch_size})...")
 
     session = requests.Session()
+    # Configuration des tentatives de reconnexion en cas d'échec réseau
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
 
-    # Passage à un batch_size très réduit (5 au lieu de 10 ou 100)
     for i in range(0, len(points_uniques), batch_size):
         batch = points_uniques.iloc[i:i+batch_size]
         
@@ -82,7 +79,7 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
             response.raise_for_status()
             data = response.json()
             
-            # Gestion robuste du format de réponse de l'API Open-Meteo
+            # Parsing sécurisé de la structure de réponse JSON
             if isinstance(data, dict):
                 elevations = data.get('elevation', [])
                 if isinstance(elevations, (int, float)):
@@ -92,7 +89,7 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
             else:
                 elevations = []
 
-            # Si le nombre d'altitudes ne correspond pas, on comble par précaution
+            # Remplissage de secours si la réponse est incomplète
             if len(elevations) != len(batch):
                 elevations = [250.0] * len(batch)
                 
@@ -102,7 +99,7 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
             logging.warning(f"Erreur d'élévation sur le lot {i} : {e}. Application de 250m par défaut.")
             altitudes_totales.extend([250.0] * len(batch))
             
-        # Pause pour éviter de saturer l'API avec des micro-requêtes
+        # Pause de courtoisie (rate-limiting OSINT)
         time.sleep(0.5)
 
     points_uniques = points_uniques.copy()
@@ -111,10 +108,9 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
     return points_uniques
 
 
-def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size=10) -> pd.DataFrame:
+def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size: int = 10) -> pd.DataFrame:
     """
-    Module 2B : Acquisition Météorologique par mini-lots (batch_size=10) 
-    pour éliminer tout risque de Timeout sur le serveur distant.
+    Module 2B : Acquisition Météorologique par mini-lots (10 points).
     """
     url = "https://api.open-meteo.com/v1/forecast"
     resultats = []
@@ -179,7 +175,7 @@ def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size=10) -> pd
 
 def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     """
-    Module 3 : Orchestration et propagation des données météo et topographiques sur la grille complète.
+    Module 3 : Orchestration et propagation des données météo et topographiques.
     """
     if not os.path.exists(chemin_grille):
         logging.error(f"ERREUR CRITIQUE : Fichier de grille introuvable : '{chemin_grille}'.")
@@ -188,20 +184,20 @@ def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     logging.info(f"Chargement du maillage spatial : {chemin_grille}")
     gdf_grille = gpd.read_file(chemin_grille)
     
-    # 1. Extraction des points uniques et filtrage géographique
+    # 1. Extraction des points uniques
     points_uniques, df_mapping = extraire_points_meteo_uniques(gdf_grille)
     
-    # 2. Récupération de l'élévation réelle via l'API Open-Meteo Elevation (CORRECTION ICI)
+    # 2. Récupération Topographique (Forçage strict du lot à 5)
     points_uniques = recuperer_elevation_batch(points_uniques, batch_size=5)
     
-    # 3. Récupération de la météo prévisionnelle
+    # 3. Récupération Météorologique
     df_meteo = requeter_open_meteo_batch(points_uniques, batch_size=10)
     
     if df_meteo.empty:
         logging.error("Aucune donnée météo exploitable récupérée. Arrêt.")
         exit(1)
         
-    # Fusion des données météo et topographiques sur les points uniques
+    # Fusion des données sur les centroïdes uniques
     df_complet_uniques = points_uniques.merge(df_meteo, on=['lat_meteo', 'lon_meteo'], how='left')
     
     logging.info("Propagation des données météo et topographiques sur la grille fine (1km)...")
@@ -209,14 +205,14 @@ def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     df_complet_uniques.ffill(inplace=True)
     df_enrichi = df_mapping.merge(df_complet_uniques, on=['lat_meteo', 'lon_meteo'], how='left')
     
-    # Valeurs par défaut de secours pour éviter les NaN
+    # Comblement des valeurs manquantes potentielles (sécurité XGBoost)
     df_enrichi['t_max'] = df_enrichi['t_max'].fillna(35.0)
     df_enrichi['h_mean'] = df_enrichi['h_mean'].fillna(50.0)
     df_enrichi['wind_max'] = df_enrichi['wind_max'].fillna(15.0)
     df_enrichi['precip_sum'] = df_enrichi['precip_sum'].fillna(0.0)
     df_enrichi['elevation_m'] = df_enrichi['elevation_m'].fillna(250.0)
     
-    # Assignation finale au GeoDataFrame de la grille
+    # Injection dans le GeoDataFrame final
     gdf_grille['t_max'] = df_enrichi['t_max']
     gdf_grille['h_mean'] = df_enrichi['h_mean']
     gdf_grille['wind_max'] = df_enrichi['wind_max']
