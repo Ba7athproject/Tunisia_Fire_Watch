@@ -51,18 +51,17 @@ jobs:
           # 3. Inférence du modèle XGBoost et export CSV des zones en alerte
           python vegetation_modele_reel.py
 
-      - name: Commit et Push de la carte prédictive allégée
+      - name: Commit et Push des résultats OSINT
         run: |
-          # Configuration de l'identité du bot pour maintenir la transparence des logs
-          git config --global user.name "Pipeline ba7ath"
-          git config --global user.email "bot@ba7ath.org"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # Indexation exclusive de la matrice de risques allégée
+          # Ajout des fichiers générés
           git add carte_risques_demain_reel.csv
+          git commit -m "🤖 Mise à jour automatique de la matrice de risque (XGBoost)" || echo "Aucune modification détectée"
           
-          # Validation silencieuse (évite que le pipeline plante si aucun changement n'est détecté)
-          git commit -m "🤖 Mise à jour automatique de la matrice de risque (XGBoost)" || echo "Aucune modification de la carte détectée"
+          # Le paramètre '-X theirs' lors d'un rebase ordonne à Git de toujours privilégier le fichier local (celui fraîchement généré par le bot) en cas de conflit
+          git pull origin main --rebase -X theirs
           
-          # Rangement temporaire des .tif, synchronisation, puis envoi
-          git pull --rebase --autostash origin main
+          # Envoi de la mise à jour sur le dépôt
           git push
