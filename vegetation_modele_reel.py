@@ -60,13 +60,7 @@ def generer_carte_risques_ciblee(
         gdf_grille["ndvi"] = extraire_valeurs_raster(centroides, raster_ndvi)
         gdf_grille["ndwi"] = extraire_valeurs_raster(centroides, raster_ndwi)
 
-        # 4. Injection de l'altitude (approximation basée sur la latitude/longitude ou valeur par défaut sécurisée)
-        # Pour maintenir la conformité avec les 7 features du nouveau modèle XGBoost :
-        if "elevation_m" not in gdf_grille.columns:
-            # Approximation topographique de base pour les centroïdes tunisiens si absente de la grille
-            gdf_grille["elevation_m"] = 250.0 
-
-        # 5. Filtre de biomasse
+        # 4. Filtre de biomasse
         gdf_combustible = gdf_grille[gdf_grille["ndvi"] >= seuil_ndvi_min].copy()
         logger.info(f"Filtrage biomasse (NDVI >= {seuil_ndvi_min}) : {len(gdf_combustible):,} mailles retenues.")
 
@@ -74,18 +68,31 @@ def generer_carte_risques_ciblee(
             logger.warning("Aucune maille ne présente un couvert végétal suffisant.")
             return
 
-        # 6. Inférence du modèle XGBoost (7 features attendues)
+        # 5. Chargement du modèle XGBoost (7 features attendues)
         logger.info(f"Chargement du modèle XGBoost (.joblib) : {fichier_modele}")
         modele_xgb = joblib.load(fichier_modele)
 
+        # Liste stricte des 7 variables exigées par le modèle
         features_cols = ["t_max", "h_mean", "wind_max", "precip_sum", "ndvi", "ndwi", "elevation_m"]
+
+        # 6. BLINDAGE STRICT : Garantir la présence et l'intégrité de TOUTES les colonnes
+        for col in features_cols:
+            if col not in gdf_combustible.columns:
+                # Si l'altitude manque, on met 250m par défaut ; sinon 0.0
+                gdf_combustible[col] = 250.0 if col == "elevation_m" else 0.0
+            else:
+                # Si la colonne existe mais contient des NaN, on remplit
+                valeur_defaut = 250.0 if col == "elevation_m" else 0.0
+                gdf_combustible[col] = gdf_combustible[col].fillna(valeur_defaut)
+
         X_pred = gdf_combustible[features_cols].copy().astype(float)
 
+        # 7. Inférence sécurisée
         logger.info("Calcul des probabilités de départ de feu...")
         probabilites = modele_xgb.predict_proba(X_pred)[:, 1]
         gdf_combustible["risque_prob"] = (probabilites * 100).round(1)
 
-        # 7. Seuils de vigilance opérationnelle
+        # 8. Seuils de vigilance opérationnelle
         gdf_alertes = gdf_combustible[gdf_combustible["risque_prob"] >= seuil_risque_min].copy()
 
         conditions = [
@@ -98,7 +105,7 @@ def generer_carte_risques_ciblee(
 
         logger.info(f"Foyers potentiels retenus après seuillage : {len(gdf_alertes):,} mailles.")
 
-        # 8. Export CSV ultra-rapide pour Streamlit
+        # 9. Export CSV ultra-rapide pour Streamlit
         logger.info("Conversion des géométries en points simples (CSV) pour le tableau de bord...")
         
         gdf_alertes_proj = gdf_alertes.to_crs(epsg=32632)
