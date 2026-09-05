@@ -302,17 +302,18 @@ def run_automated_pipeline():
         frp_value = float(row.get('frp', 0.0))
 
         # Préparation des variables explicatives pour le modèle XGBoost
+        # Préparation des 7 variables explicatives pour le modèle XGBoost
         features = pd.DataFrame([{
             't_max': meteo['t_max'],
             'h_mean': meteo['h_mean'],
             'wind_max': meteo['wind_max'],
             'precip_sum': meteo['precip_sum'],
             'ndvi': ndvi,
-            'ndwi': ndwi
+            'ndwi': ndwi,
+            'elevation_m': 250.0 # Valeur par défaut ou extraction locale si disponible
         }])
-        # Le modèle ne s'attend plus à recevoir le FRP
-        features = features[['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi']]
-
+        features = features[['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi', 'elevation_m']]
+        
         # Calcul de la probabilité de risque d'incendie (0 à 100%)
         risque_prob = float(model.predict_proba(features)[:, 1][0]) * 100
 

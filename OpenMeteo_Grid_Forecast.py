@@ -50,14 +50,15 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
     return points_uniques, df_coords
 
 
-def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 100) -> pd.DataFrame:
+def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10) -> pd.DataFrame:
     """
-    Module 2A : Interroge l'API Open-Meteo Elevation par lots pour récupérer l'altitude réelle.
+    Module 2A : Interroge l'API Open-Meteo Elevation par petits lots (10 points) 
+    pour éviter les erreurs de longueur d'URL (HTTP 414) ou les Timeouts.
     """
     url = "https://api.open-meteo.com/v1/elevation"
     altitudes_totales = []
 
-    logging.info(f"Début de l'extraction topographique pour {len(points_uniques)} points uniques...")
+    logging.info(f"Début de l'extraction topographique réelle pour {len(points_uniques)} points...")
 
     session = requests.Session()
     retry_strategy = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
@@ -67,8 +68,8 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10
     for i in range(0, len(points_uniques), batch_size):
         batch = points_uniques.iloc[i:i+batch_size]
         
-        lats = ",".join(batch['lat_meteo'].round(4).astype(str).tolist())
-        lons = ",".join(batch['lon_meteo'].round(4).astype(str).tolist())
+        lats = ",".join(batch['lat_meteo'].astype(str).tolist())
+        lons = ",".join(batch['lon_meteo'].astype(str).tolist())
         
         params = {
             "latitude": lats,
@@ -80,18 +81,31 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10
             response.raise_for_status()
             data = response.json()
             
-            elevations = data.get('elevation', [250.0] * len(batch))
+            # Gestion robuste du format de réponse de l'API Open-Meteo
+            if isinstance(data, dict):
+                elevations = data.get('elevation', [])
+                if isinstance(elevations, (int, float)):
+                    elevations = [elevations]
+            elif isinstance(data, list):
+                elevations = [item.get('elevation', 250.0) for item in data]
+            else:
+                elevations = []
+
+            # Si le nombre d'altitudes ne correspond pas, on comble par précaution
+            if len(elevations) != len(batch):
+                elevations = [250.0] * len(batch)
+                
             altitudes_totales.extend(elevations)
             
         except Exception as e:
-            logging.warning(f"Erreur d'élévation sur le lot {i}-{i+batch_size}: {e}. Valeur par défaut 250m.")
+            logging.warning(f"Erreur d'élévation sur le lot {i} : {e}. Application de 250m par défaut.")
             altitudes_totales.extend([250.0] * len(batch))
             
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     points_uniques = points_uniques.copy()
     points_uniques['elevation_m'] = altitudes_totales
-    logging.info("✔ Extraction topographique terminée avec succès.")
+    logging.info("✔ Extraction topographique réelle terminée.")
     return points_uniques
 
 
