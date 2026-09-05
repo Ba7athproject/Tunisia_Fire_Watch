@@ -1,59 +1,56 @@
+import pandas as pd
+import requests
 import logging
-import pystac_client
-import planetary_computer
-import odc.stac
-import geopandas as gpd
-from shapely.geometry import Point
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def obtenir_elevation_stac(lon: float, lat: float) -> float:
+def enrichir_topographie_historique(df_foyers: pd.DataFrame, batch_size: int = 100) -> pd.DataFrame:
     """
-    Extrait l'altitude précise (en mètres) d'une coordonnée GPS
-    via le Modèle Numérique de Surface Copernicus (30m).
+    Interroge l'API Open-Meteo Elevation par lots pour récupérer l'altitude.
+    df_foyers doit contenir les colonnes 'latitude' et 'longitude'.
     """
-    try:
-        # Bounding box microscopique autour du point
-        buffer = 0.0001
-        bbox = [lon - buffer, lat - buffer, lon + buffer, lat + buffer]
+    url = "https://api.open-meteo.com/v1/elevation"
+    altitudes_totales = []
 
-        catalog = pystac_client.Client.open(
-            "https://planetarycomputer.microsoft.com/api/stac/v1",
-            modifier=planetary_computer.sign_inplace,
-        )
+    logging.info(f"Début de l'extraction topographique pour {len(df_foyers)} points...")
 
-        search = catalog.search(
-            collections=["cop-dem-glo-30"],
-            bbox=bbox
-        )
+    for i in range(0, len(df_foyers), batch_size):
+        batch = df_foyers.iloc[i:i+batch_size]
         
-        items = list(search.items())
-        if not items:
-            logging.warning("Aucune tuile topographique trouvée pour ces coordonnées.")
-            return 0.0
-
-        # Chargement du pixel d'élévation (Bande 'data')
-        cube = odc.stac.load(
-            items,
-            bands=["data"],
-            bbox=bbox,
-            resolution=30,
-            crs="EPSG:4326",
-            chunks={}
-        )
+        # Formatage des coordonnées avec une précision de 4 décimales (~11 mètres)
+        lats = ",".join(batch['latitude'].round(4).astype(str).tolist())
+        lons = ",".join(batch['longitude'].round(4).astype(str).tolist())
         
-        # Extraction de la valeur moyenne du pixel
-        elevation = float(cube["data"].mean().compute().values)
-        return round(elevation, 1)
+        params = {
+            "latitude": lats,
+            "longitude": lons
+        }
+        
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            # L'API renvoie une liste directe d'altitudes dans la clé 'elevation'
+            elevations = data.get('elevation', [0.0] * len(batch))
+            altitudes_totales.extend(elevations)
+            
+        except Exception as e:
+            logging.error(f"Erreur sur le lot {i}-{i+batch_size}: {e}")
+            altitudes_totales.extend([None] * len(batch))
 
-    except Exception as exc:
-        logging.error(f"Erreur lors de l'extraction topographique : {exc}")
-        return 0.0
+    df_foyers = df_foyers.copy()
+    df_foyers['elevation_m'] = altitudes_totales
+    
+    logging.info("Enrichissement topographique terminé.")
+    return df_foyers
 
 if __name__ == "__main__":
-    # Test d'élévation sur le point culminant naturel de la Tunisie (Jebel ech Chambi)
-    lon_test, lat_test = 8.6656, 35.2011 
+    # Test unitaire avec le Jebel ech Chambi et un point au niveau de la mer
+    df_test = pd.DataFrame({
+        'latitude': [35.2011, 36.8065],
+        'longitude': [8.6656, 10.1815]
+    })
     
-    logging.info(f"Interrogation du modèle Copernicus pour les coordonnées : {lat_test}, {lon_test}")
-    altitude = obtenir_elevation_stac(lon_test, lat_test)
-    logging.info(f"Altitude détectée : {altitude} mètres.")
+    df_resultat = enrichir_topographie_historique(df_test)
+    print(df_resultat)

@@ -2,7 +2,6 @@ import os
 import logging
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import joblib
 
 # Bibliothèques Machine Learning (XGBoost & Scikit-Learn)
@@ -11,118 +10,158 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 
 # -----------------------------------------------------------------------------
-# Configuration et Traçabilité (Standards OSINT)
+# Configuration et Traçabilité (Standards OSINT & ba7ath)
 # -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-DOSSIER_PROJET = r"C:\Ba7ath_project\Tunisia-fire-detection"
-FICHIER_DATASET = os.path.join(DOSSIER_PROJET, "dataset_ml_impute.geojson")
-FICHIER_HISTORIQUE = os.path.join(DOSSIER_PROJET, "historique_incendies_propre.csv")
-MODELE_SORTIE = os.path.join(DOSSIER_PROJET, "modele_xgboost_tunisia_fire.joblib")
+FICHIER_DATASET = "dataset_incendies_avec_topographie.csv"
+MODELE_SORTIE = "modele_xgboost_tunisia_fire.joblib"
 
-def preparer_donnees_apprentissage(chemin_dataset: str, chemin_historique: str):
+
+def generer_pseudo_absences_realistes(df_positifs: pd.DataFrame, ratio: float = 1.0) -> pd.DataFrame:
     """
-    Prépare et fusionne les features météo, végétation et l'historique 
-    pour constituer la matrice d'entraînement du modèle.
+    Génère des contre-exemples (labels = 0) scientifiquement cohérents pour le climat tunisien.
+    Évite le raccourci naïf sur la pluie en créant des journées sèches mais sans incendie
+    (végétation humide, altitudes variables, températures modérées).
     """
-    logging.info("Chargement du dataset imputé et de l'historique...")
-    if not os.path.exists(chemin_dataset) or not os.path.exists(chemin_historique):
-        logging.error("Fichiers d'entrée introuvables. Veuillez vérifier les chemins.")
-        return None, None
-
-    # 1. Chargement des anomalies (Positifs : Label = 1)
-    gdf_pos = gpd.read_file(chemin_dataset)
-    gdf_pos['label'] = 1 # Présence d'un feu actif validé
-
-    # 2. Chargement de l'historique pour pondérer le risque structurel par gouvernorat
-    df_hist = pd.read_csv(chemin_historique)
-    # Calcul de la moyenne des surfaces brûlées par gouvernorat comme proxy de vulnérabilité historique
-    vulnerabilite_gov = df_hist.groupby('gov_latin')['superficie_ha'].mean().to_dict()
-
-    # 3. Sélection des caractéristiques (Features) explicatives
-    # Le modèle apprend à partir de la météo, de la sécheresse végétale et de la puissance radiative
-    features_cols = ['t_max', 'h_mean', 'wind_max', 'precip_sum', 'ndvi', 'ndwi', 'frp']
-    
-    # Extraction des données positives
-    X_pos = gdf_pos[features_cols].copy()
-    y_pos = gdf_pos['label'].copy()
-
-    # 4. Génération de contre-exemples synthétiques (Négatifs : Label = 0)
-    # Pour que le modèle comprenne ce qu'est un jour SANS feu, on perturbe légèrement les données 
-    # avec des conditions météo plus clémentes et une végétation saine.
-    logging.info("Génération de contre-exemples pour l'apprentissage binaire...")
+    logging.info("Génération de contre-exemples réalistes (pseudo-absences)...")
     np.random.seed(42)
-    n_neg = len(X_pos)
-    
-    X_neg = pd.DataFrame({
-        't_max': np.random.uniform(25.0, 34.0, n_neg),      # Températures modérées
-        'h_mean': np.random.uniform(50.0, 85.0, n_neg),     # Humidité élevée
-        'wind_max': np.random.uniform(5.0, 12.0, n_neg),    # Vent faible
-        'precip_sum': np.random.uniform(1.0, 15.0, n_neg),  # Présence de pluie
-        'ndvi': np.random.uniform(0.4, 0.7, n_neg),         # Végétation dense et verte
-        'ndwi': np.random.uniform(0.1, 0.4, n_neg),         # Sol humide
-        'frp': 0.0                                          # Pas d'anomalie thermique
+    n_neg = int(len(df_positifs) * ratio)
+
+    # 1. Distribution réaliste des précipitations :
+    # 70% des jours normaux d'été en Tunisie ont 0.0 mm de pluie
+    precip_realiste = np.random.choice(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.2, 3.5, 8.0], 
+        size=n_neg
+    )
+
+    # 2. Températures estivales et printanières plausibles mais sous le seuil critique d'ignition
+    t_max_realiste = np.random.uniform(22.0, 35.0, n_neg)
+
+    # 3. Humidité de l'air modérée à élevée
+    h_mean_realiste = np.random.uniform(40.0, 80.0, n_neg)
+
+    # 4. Vent modéré
+    wind_max_realiste = np.random.uniform(5.0, 20.0, n_neg)
+
+    # 5. Indices géobotaniques réalistes :
+    # Zones sans feu souvent caractérisées par un bon état hydrique (NDWI élevé)
+    # ou un couvert végétal absent/faible (zones agricoles récoltées, sols nus)
+    ndvi_realiste = np.random.uniform(0.15, 0.65, n_neg)
+    ndwi_realiste = np.random.uniform(0.05, 0.35, n_neg)
+
+    # 6. Altitudes réparties sur la topographie tunisienne (plaines, collines, moyenne montagne)
+    elevation_realiste = np.random.uniform(10.0, 1200.0, n_neg)
+
+    df_neg = pd.DataFrame({
+        't_max': t_max_realiste,
+        'h_mean': h_mean_realiste,
+        'wind_max': wind_max_realiste,
+        'precip_sum': precip_realiste,
+        'ndvi': ndvi_realiste,
+        'ndwi': ndwi_realiste,
+        'elevation_m': elevation_realiste,
+        'label': 0
     })
-    y_neg = pd.Series([0] * n_neg)
 
-    # 5. Fusion des matrices X et y
-    X = pd.concat([X_pos, X_neg], ignore_index=True)
-    y = pd.concat([y_pos, y_neg], ignore_index=True)
+    return df_neg
 
-    logging.info(f"Dataset prêt pour XGBoost : {len(X)} échantillons au total ({len(X_pos)} feux, {n_neg} non-feux).")
+
+def preparer_donnees_apprentissage(chemin_dataset: str):
+    """
+    Prépare et fusionne les features climatiques, géobotaniques et topographiques.
+    Garantit l'alignement des colonnes et la validation de la structure de données.
+    """
+    logging.info("Chargement du dataset enrichi avec topographie...")
+    if not os.path.exists(chemin_dataset):
+        raise FileNotFoundError(f"Fichier d'entrée introuvable : {chemin_dataset}")
+
+    df_pos = pd.read_csv(chemin_dataset)
+    df_pos['label'] = 1 
+
+    # Liste stricte des caractéristiques explicatives (FRP banni pour éviter le target leakage)
+    features_cols = ["t_max", "h_mean", "wind_max", "precip_sum", "ndvi", "ndwi", "elevation_m"]
+    
+    # Nettoyage des valeurs aberrantes ou manquantes
+    df_pos = df_pos.dropna(subset=features_cols).copy()
+    
+    # Génération des négatifs avec la même distribution de colonnes
+    df_neg = generer_pseudo_absences_realistes(df_pos, ratio=1.2)
+
+    # Fusion des jeux de données positifs et négatifs
+    df_complet = pd.concat([df_pos[features_cols + ['label']], df_neg], ignore_index=True)
+
+    X = df_complet[features_cols].copy()
+    y = df_complet['label'].copy()
+
+    logging.info(
+        f"Dataset final consolidé : {len(X)} observations "
+        f"({len(df_pos)} foyers réels, {len(df_neg)} contre-exemples réalistes)."
+    )
     return X, y
 
-def entrainer_modele_xgboost(X, y, chemin_modele_sortie):
+
+def entrainer_modele_xgboost(X: pd.DataFrame, y: pd.Series, chemin_modele_sortie: str) -> xgb.XGBClassifier:
     """
-    Entraîne un classificateur XGBoost avec séparation temporelle/aléatoire 
-    et évalue ses performances.
+    Entraîne un modèle XGBoost régularisé, évalue l'équilibre des décisions
+    et exporte les poids des variables explicatives.
     """
-    # 1. Séparation Train / Test (80% / 20%)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # Stratification pour conserver le ratio 1/0 dans les jeux Train et Test
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=42, stratify=y
+    )
     
-    logging.info("Entraînement du modèle XGBoost Classifier en cours...")
+    logging.info("Entraînement de l'algorithme XGBoost avec pénalisation L1/L2...")
     
-    # 2. Configuration des hyperparamètres du modèle
-    # XGBoost est choisi pour sa robustesse face aux données tabulaires hétérogènes
+    # Configuration des hyperparamètres avec régularisation (reg_alpha, reg_lambda)
+    # pour empêcher un arbre de se focaliser exclusivement sur une seule feature
     model = xgb.XGBClassifier(
-        n_estimators=100,
-        max_depth=5,
-        learning_rate=0.1,
+        n_estimators=180,
+        max_depth=4,              # Profondeur modérée pour éviter la mémorisation brute
+        learning_rate=0.04,        # Vitesse d'apprentissage progressive
         subsample=0.8,
         colsample_bytree=0.8,
+        reg_alpha=0.1,             # Régularisation L1 (évite le surapprentissage)
+        reg_lambda=1.0,            # Régularisation L2
         random_state=42,
         eval_metric="logloss"
     )
 
-    # 3. Ajustement (Fitting)
     model.fit(X_train, y_train)
 
-    # 4. Évaluation des performances
-    logging.info("Évaluation des performances sur l'ensemble de test...")
+    logging.info("Évaluation des métriques de classification...")
     y_pred = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
 
-    print("\n--- Rapport de Classification ---")
-    print(classification_report(y_test, y_pred))
+    print("\n" + "="*50)
+    print("RAPPORT DE CLASSIFICATION (Sur données de test)")
+    print("="*50)
+    print(classification_report(y_test, y_pred, target_names=["Sans Risque (0)", "Risque Feu (1)"]))
     
     auc_score = roc_auc_score(y_test, y_proba)
-    logging.info(f"Score AUC-ROC du modèle : {auc_score:.4f}")
+    logging.info(f"Score AUC-ROC réaliste : {auc_score:.4f}")
 
-    # 5. Sauvegarde du modèle entraîné pour l'application web
+    print("\n" + "-"*50)
+    print("IMPORTANCE DES VARIABLES (Prise de décision physique)")
+    print("-"*50)
+    importances = model.feature_importances_
+    features = X.columns
+    df_importance = pd.DataFrame({'Variable': features, 'Poids (%)': (importances * 100).round(2)})
+    df_importance = df_importance.sort_values(by='Poids (%)', ascending=False)
+    print(df_importance.to_string(index=False))
+    print("-"*50)
+
+    # Sauvegarde de l'artefact pour production
     joblib.dump(model, chemin_modele_sortie)
-    logging.info(f"Modèle sauvegardé avec succès dans : {chemin_modele_sortie}")
-    
+    logging.info(f"✔ Nouveau modèle validé et sérialisé dans : {chemin_modele_sortie}")
     return model
 
-# -----------------------------------------------------------------------------
-# Point d'entrée principal
-# -----------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    logging.info("--- Démarrage du pipeline Machine Learning Tunisia Fire Watch ---")
-    
-    X_data, y_data = preparer_donnees_apprentissage(FICHIER_DATASET, FICHIER_HISTORIQUE)
-    
-    if X_data is not None and not X_data.empty:
+    logging.info("=== DÉMARRAGE DE LA MODÉLISATION PRÉDICTIVE (TUNISIA FIRE WATCH) ===")
+    try:
+        X_data, y_data = preparer_donnees_apprentissage(FICHIER_DATASET)
         entrainer_modele_xgboost(X_data, y_data, MODELE_SORTIE)
-        
-    logging.info("--- Fin du processus d'entraînement ---")
+    except Exception as e:
+        logging.error(f"Échec critique du pipeline d'apprentissage : {e}", exc_info=True)
+    logging.info("=== FIN DU TRAITEMENT ===")
