@@ -1,11 +1,11 @@
 import logging
 import os
+import glob
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
-import xgboost as xgb
-import glob
+import joblib  # <-- Indispensable pour lire le format .joblib
 
 # Configuration de la journalisation pour la traçabilité de l'investigation
 logging.basicConfig(
@@ -62,7 +62,7 @@ def generer_carte_risques_ciblee(
         gdf_grille["ndvi"] = extraire_valeurs_raster(centroides, raster_ndvi)
         gdf_grille["ndwi"] = extraire_valeurs_raster(centroides, raster_ndwi)
 
-        # 4. Filtre de biomasse : on exclut les zones sans couvert végétal (déserts, villes)
+        # 4. Filtre de biomasse
         gdf_combustible = gdf_grille[gdf_grille["ndvi"] >= seuil_ndvi_min].copy()
         logger.info(f"Filtrage biomasse (NDVI >= {seuil_ndvi_min}) : {len(gdf_combustible):,} mailles retenues.")
 
@@ -70,10 +70,9 @@ def generer_carte_risques_ciblee(
             logger.warning("Aucune maille ne présente un couvert végétal suffisant.")
             return
 
-        # 5. Inférence du modèle XGBoost
-        logger.info(f"Chargement du modèle XGBoost : {fichier_modele}")
-        modele_xgb = xgb.XGBClassifier()
-        modele_xgb.load_model(fichier_modele)
+        # 5. Inférence du modèle XGBoost (Correction de la méthode de chargement)
+        logger.info(f"Chargement du modèle XGBoost (.joblib) : {fichier_modele}")
+        modele_xgb = joblib.load(fichier_modele)
 
         features_cols = ["t_max", "h_mean", "wind_max", "precip_sum", "ndvi", "ndwi"]
         X_pred = gdf_combustible[features_cols].copy().astype(float)
@@ -95,17 +94,15 @@ def generer_carte_risques_ciblee(
 
         logger.info(f"Foyers potentiels retenus après seuillage : {len(gdf_alertes):,} mailles.")
 
-        # 7. Export CSV ultra-rapide pour Streamlit (on abandonne le GeoJSON lourd)
+        # 7. Export CSV ultra-rapide pour Streamlit
         logger.info("Conversion des géométries en points simples (CSV) pour le tableau de bord...")
         
-        # Extraction précise des coordonnées géographiques
         gdf_alertes_proj = gdf_alertes.to_crs(epsg=32632)
         centroides_finaux = gdf_alertes_proj.geometry.centroid.to_crs(gdf_alertes.crs)
         
         gdf_alertes["lon"] = centroides_finaux.x
         gdf_alertes["lat"] = centroides_finaux.y
         
-        # Suppression du polygone géométrique et sauvegarde tabulaire
         df_export = pd.DataFrame(gdf_alertes.drop(columns=["geometry"]))
         df_export.to_csv(fichier_sortie, index=False)
         
@@ -117,8 +114,6 @@ def generer_carte_risques_ciblee(
 
 
 if __name__ == "__main__":
-    import glob
-    
     # Recherche dynamique de la dernière grille météo générée
     fichiers_grille = glob.glob("grille_meteo_previsionnelle_*.geojson")
     
@@ -128,12 +123,13 @@ if __name__ == "__main__":
         
     # Trie par ordre alphabétique/date et prend le dernier
     fichier_grille_jour = sorted(fichiers_grille)[-1]
+    logger.info(f"Grille météo dynamique identifiée : {fichier_grille_jour}")
     
     generer_carte_risques_ciblee(
         fichier_grille=fichier_grille_jour,
         raster_ndvi="tunisie_ndvi_actuel.tif",
         raster_ndwi="tunisie_ndwi_actuel.tif",
-        fichier_modele="modele_xgboost_tunisia_fire.joblib", # Nom mis à jour selon tes logs
+        fichier_modele="modele_xgboost_tunisia_fire.joblib",
         fichier_sortie="carte_risques_demain_reel.csv",
         seuil_ndvi_min=0.30,
         seuil_risque_min=65.0
