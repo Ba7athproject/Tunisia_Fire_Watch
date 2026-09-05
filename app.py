@@ -28,7 +28,7 @@ with col_title:
 
 st.markdown("""
 *Plateforme d'investigation numérique et de modélisation prédictive des anomalies thermiques en Tunisie.* 
-Exploitation conjointe des archives **VIIRS**, du climat **Open-Meteo**, de la biomasse **MODIS** et de l'IA **XGBoost**.
+Exploitation conjointe des archives **VIIRS**, du climat **Open-Meteo**, de la biomasse **MODIS** et de l'IA **XGBoost** enrichie par topographie.
 """)
 st.markdown("---")
 
@@ -91,32 +91,31 @@ with tab_pred:
         seuil_risque = st.sidebar.slider("Niveau de risque minimal (%)", 65, 100, 75)
         df_filtre_pred = df_pred[df_pred['risque_prob'] >= seuil_risque].copy()
         
-        # Métriques de synthèse
+        # Métriques de synthèse enrichies (avec inclusion de la topographie)
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Zones d'alerte détectées", f"{len(df_filtre_pred):,}")
         
-        # Gestion des valeurs maximales en évitant les erreurs si le dataframe est vide
         max_temp = df_filtre_pred['t_max'].max() if not df_filtre_pred.empty else 0
         max_wind = df_filtre_pred['wind_max'].max() if not df_filtre_pred.empty else 0
-        min_ndwi = df_filtre_pred['ndwi'].min() if not df_filtre_pred.empty else 0
+        mean_elev = df_filtre_pred['elevation_m'].mean() if 'elevation_m' in df_filtre_pred.columns and not df_filtre_pred.empty else 0
         
         col2.metric("Température Max", f"{max_temp:.1f} °C")
         col3.metric("Vent Max (Rafales)", f"{max_wind:.1f} km/h")
-        col4.metric("Stress Hydrique Critique", f"{min_ndwi:.3f}")
+        col4.metric("Altitude Moy. (Cible)", f"{mean_elev:.0f} m")
         
         # Colorimétrie dynamique : Jaune -> Orange -> Rouge selon la probabilité
         df_filtre_pred['color'] = df_filtre_pred['risque_prob'].apply(
             lambda x: [255, 204, 0, 180] if x < 75 else ([255, 102, 0, 200] if x < 85 else [255, 0, 0, 230])
         )
         
-        # Rendu spatial PyDeck
+        # Rendu spatial PyDeck (avec intégration de l'élévation dans le tooltip)
         layer_pred = pdk.Layer(
             "ColumnLayer",
             data=df_filtre_pred,
             get_position='[lon, lat]',
-            get_elevation='risque_prob * 30', # Élévation proportionnelle
+            get_elevation='risque_prob * 30',
             elevation_scale=10,
-            radius=400, # Largeur de la colonne pour visibilité
+            radius=400,
             get_fill_color='color',
             pickable=True,
             auto_highlight=True,
@@ -130,6 +129,7 @@ with tab_pred:
                 "html": "<b>{niveau_vigilance}</b><br/>"
                         "Risque : {risque_prob}%<br/>"
                         "TMax: {t_max}°C | Vent: {wind_max} km/h<br/>"
+                        "Altitude: {elevation_m} m<br/>"
                         "NDVI: {ndvi}"
             }
         )
@@ -144,7 +144,6 @@ with tab_realtime:
     df_foyers = load_realtime_data()
     if not df_foyers.empty:
         st.subheader("Anomalies Thermiques Actives (Satellites NASA/NOAA)")
-        # Rayon du cercle basé sur l'intensité du feu (FRP)
         df_foyers['radius'] = df_foyers['frp'].apply(lambda x: min(x * 50, 3000))
         layer_realtime = pdk.Layer(
             "ScatterplotLayer",
@@ -184,7 +183,7 @@ with tab_history:
 st.markdown("---")
 with st.expander("⚖️ Méthodologie et Transparence OSINT"):
     st.markdown("""
-    * **Collecte** : Fusion automatisée des archives ouvertes de la **NASA** (VIIRS), des réanalyses climatiques d'**Open-Meteo** (ERA5) et de l'imagerie **MODIS**.
+    * **Collecte** : Fusion automatisée des archives ouvertes de la **NASA** (VIIRS), des réanalyses climatiques d'**Open-Meteo**, de l'imagerie **MODIS** et du modèle numérique d'élévation **Copernicus DEM**.
     * **IA et Biais** : La modélisation prédictive repose sur l'algorithme open-source XGBoost. Afin d'éviter les fuites de données (Target Leakage), les variables thermiques post-incendie (FRP) ont été rigoureusement exclues de l'apprentissage.
     * **Documentation** : Les prédictions n'ont qu'une vocation d'analyse journalistique spatiale et ne se substituent pas aux alertes formelles de l'Observatoire National de l'Agriculture ou de la Protection Civile.
     """)
