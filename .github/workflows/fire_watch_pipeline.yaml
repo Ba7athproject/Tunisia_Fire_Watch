@@ -39,6 +39,9 @@ jobs:
           # 1. Collecte automatisée des anomalies thermiques actives (FIRMS) et données météo
           python Run_Automation_Pipeline.py
           
+          # 1.5 Génération de la grille météorologique prévisionnelle nationale (Open-Meteo)
+          python OpenMeteo_Grid_Forecast.py
+          
           # 2. Téléchargement et calcul de la biomasse géobotanique (NDVI/NDWI via MODIS)
           python telecharger_biomasse_actuelle.py
           
