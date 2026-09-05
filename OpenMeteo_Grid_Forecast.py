@@ -50,10 +50,10 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
     return points_uniques, df_coords
 
 
-def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10) -> pd.DataFrame:
+def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5) -> pd.DataFrame:
     """
-    Module 2A : Interroge l'API Open-Meteo Elevation par petits lots (10 points) 
-    pour éviter les erreurs de longueur d'URL (HTTP 414) ou les Timeouts.
+    Module 2A : Interroge l'API Open-Meteo Elevation par ultra-petits lots (5 points) 
+    pour éviter les erreurs d'URL trop longue (HTTP 414) et garantir l'extraction.
     """
     url = "https://api.open-meteo.com/v1/elevation"
     altitudes_totales = []
@@ -61,10 +61,11 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10
     logging.info(f"Début de l'extraction topographique réelle pour {len(points_uniques)} points...")
 
     session = requests.Session()
-    retry_strategy = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
+    retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
 
+    # Passage à un batch_size très réduit (5 au lieu de 10 ou 100)
     for i in range(0, len(points_uniques), batch_size):
         batch = points_uniques.iloc[i:i+batch_size]
         
@@ -77,7 +78,7 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10
         }
         
         try:
-            response = session.get(url, params=params, timeout=20)
+            response = session.get(url, params=params, timeout=15)
             response.raise_for_status()
             data = response.json()
             
@@ -101,7 +102,8 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 10
             logging.warning(f"Erreur d'élévation sur le lot {i} : {e}. Application de 250m par défaut.")
             altitudes_totales.extend([250.0] * len(batch))
             
-        time.sleep(0.3)
+        # Pause pour éviter de saturer l'API avec des micro-requêtes
+        time.sleep(0.5)
 
     points_uniques = points_uniques.copy()
     points_uniques['elevation_m'] = altitudes_totales
