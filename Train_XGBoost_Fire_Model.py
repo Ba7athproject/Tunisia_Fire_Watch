@@ -7,7 +7,7 @@ import joblib
 # Bibliothèques Machine Learning (XGBoost & Scikit-Learn)
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+from sklearn.metrics import classification_report, roc_auc_score
 
 # -----------------------------------------------------------------------------
 # Configuration et Traçabilité (Standards OSINT & ba7ath)
@@ -28,14 +28,13 @@ def generer_pseudo_absences_realistes(df_positifs: pd.DataFrame, ratio: float = 
     np.random.seed(42)
     n_neg = int(len(df_positifs) * ratio)
 
-    # 1. Distribution réaliste des précipitations :
-    # 70% des jours normaux d'été en Tunisie ont 0.0 mm de pluie
+    # 1. Distribution réaliste des précipitations
     precip_realiste = np.random.choice(
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.2, 3.5, 8.0], 
         size=n_neg
     )
 
-    # 2. Températures estivales et printanières plausibles mais sous le seuil critique d'ignition
+    # 2. Températures estivales et printanières plausibles mais sous le seuil critique
     t_max_realiste = np.random.uniform(22.0, 35.0, n_neg)
 
     # 3. Humidité de l'air modérée à élevée
@@ -44,13 +43,11 @@ def generer_pseudo_absences_realistes(df_positifs: pd.DataFrame, ratio: float = 
     # 4. Vent modéré
     wind_max_realiste = np.random.uniform(5.0, 20.0, n_neg)
 
-    # 5. Indices géobotaniques réalistes :
-    # Zones sans feu souvent caractérisées par un bon état hydrique (NDWI élevé)
-    # ou un couvert végétal absent/faible (zones agricoles récoltées, sols nus)
-    ndvi_realiste = np.random.uniform(0.15, 0.65, n_neg)
-    ndwi_realiste = np.random.uniform(0.05, 0.35, n_neg)
+    # 5. Indices géobotaniques réalistes (zones terrestres valides)
+    ndvi_realiste = np.random.uniform(0.30, 0.65, n_neg)  # NDVI >= 0.3 (végétation réelle)
+    ndwi_realiste = np.random.uniform(-0.4, -0.05, n_neg) # NDWI < 0 (absence d'eau libre)
 
-    # 6. Altitudes réparties sur la topographie tunisienne (plaines, collines, moyenne montagne)
+    # 6. Altitudes terrestres de la topographie tunisienne
     elevation_realiste = np.random.uniform(10.0, 1200.0, n_neg)
 
     df_neg = pd.DataFrame({
@@ -69,10 +66,10 @@ def generer_pseudo_absences_realistes(df_positifs: pd.DataFrame, ratio: float = 
 
 def preparer_donnees_apprentissage(chemin_dataset: str):
     """
-    Prépare et fusionne les features climatiques, géobotaniques et topographiques.
-    Garantit l'alignement des colonnes et la validation de la structure de données.
+    Prépare, nettoie et fusionne les features climatiques, géobotaniques et topographiques.
+    Applique un masquage strict pour éliminer tout point historique situé en mer ou sur plan d'eau.
     """
-    logging.info("Chargement du dataset enrichi avec topographie...")
+    logging.info(f"Chargement du dataset d'entraînement : {chemin_dataset}")
     if not os.path.exists(chemin_dataset):
         raise FileNotFoundError(f"Fichier d'entrée introuvable : {chemin_dataset}")
 
@@ -82,10 +79,17 @@ def preparer_donnees_apprentissage(chemin_dataset: str):
     # Liste stricte des caractéristiques explicatives (FRP banni pour éviter le target leakage)
     features_cols = ["t_max", "h_mean", "wind_max", "precip_sum", "ndvi", "ndwi", "elevation_m"]
     
-    # Nettoyage des valeurs aberrantes ou manquantes
+    # Nettoyage des valeurs manquantes
     df_pos = df_pos.dropna(subset=features_cols).copy()
-    
-    # Génération des négatifs avec la même distribution de colonnes
+
+    # FILTRE DE SÉCURITÉ TERRESTRE HISTORIQUE : 
+    # Élimine les points enregistrés en mer ou sur les zones humides (NDWI >= 0 ou altitude négative)
+    if "ndwi" in df_pos.columns and "elevation_m" in df_pos.columns:
+        n_avant = len(df_pos)
+        df_pos = df_pos[(df_pos["ndwi"] < 0.0) & (df_pos["elevation_m"] >= 0.0)].copy()
+        logging.info(f"Nettoyage dataset historique : {n_avant - len(df_pos)} points maritimes/aquatiques exclus.")
+
+    # Génération des contre-exemples négatifs avec la même distribution
     df_neg = generer_pseudo_absences_realistes(df_pos, ratio=1.2)
 
     # Fusion des jeux de données positifs et négatifs
@@ -96,7 +100,7 @@ def preparer_donnees_apprentissage(chemin_dataset: str):
 
     logging.info(
         f"Dataset final consolidé : {len(X)} observations "
-        f"({len(df_pos)} foyers réels, {len(df_neg)} contre-exemples réalistes)."
+        f"({len(df_pos)} foyers réels validés, {len(df_neg)} contre-exemples réalistes)."
     )
     return X, y
 
@@ -106,23 +110,20 @@ def entrainer_modele_xgboost(X: pd.DataFrame, y: pd.Series, chemin_modele_sortie
     Entraîne un modèle XGBoost régularisé, évalue l'équilibre des décisions
     et exporte les poids des variables explicatives.
     """
-    # Stratification pour conserver le ratio 1/0 dans les jeux Train et Test
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.25, random_state=42, stratify=y
     )
     
     logging.info("Entraînement de l'algorithme XGBoost avec pénalisation L1/L2...")
     
-    # Configuration des hyperparamètres avec régularisation (reg_alpha, reg_lambda)
-    # pour empêcher un arbre de se focaliser exclusivement sur une seule feature
     model = xgb.XGBClassifier(
         n_estimators=180,
-        max_depth=4,              # Profondeur modérée pour éviter la mémorisation brute
-        learning_rate=0.04,        # Vitesse d'apprentissage progressive
+        max_depth=4,
+        learning_rate=0.04,
         subsample=0.8,
         colsample_bytree=0.8,
-        reg_alpha=0.1,             # Régularisation L1 (évite le surapprentissage)
-        reg_lambda=1.0,            # Régularisation L2
+        reg_alpha=0.1,
+        reg_lambda=1.0,
         random_state=42,
         eval_metric="logloss"
     )
@@ -143,13 +144,13 @@ def entrainer_modele_xgboost(X: pd.DataFrame, y: pd.Series, chemin_modele_sortie
 
     print("\n" + "-"*50)
     print("IMPORTANCE DES VARIABLES (Prise de décision physique)")
-    print("-"*50)
+    print("-" * 50)
     importances = model.feature_importances_
     features = X.columns
     df_importance = pd.DataFrame({'Variable': features, 'Poids (%)': (importances * 100).round(2)})
     df_importance = df_importance.sort_values(by='Poids (%)', ascending=False)
     print(df_importance.to_string(index=False))
-    print("-"*50)
+    print("-" * 50)
 
     # Sauvegarde de l'artefact pour production
     joblib.dump(model, chemin_modele_sortie)

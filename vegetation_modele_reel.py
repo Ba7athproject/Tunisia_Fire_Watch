@@ -54,9 +54,9 @@ def generer_carte_risques_ciblee(
     seuil_risque_min: float = 65.0
 ) -> None:
     """Filtre la grille territoriale sur les zones de biomasse terrestre réelle,
-    élimine les plans d'eau maritimes et lagunaires via NDWI,
-    calcule les probabilités d'incendie via XGBoost (incluant la topographie) 
-    et exporte exclusivement les mailles sous vigilance opérationnelle en format CSV.
+    élimine les plans d'eau maritimes et lagunaires via NDWI, applique un filtre 
+    géographique strict (bounding box), calcule les probabilités d'incendie via XGBoost 
+    et exporte exclusivement les mailles terrestres sous vigilance en CSV.
     """
     try:
         # 1. Chargement de la grille prévisionnelle
@@ -74,7 +74,6 @@ def generer_carte_risques_ciblee(
         gdf_grille["ndwi"] = extraire_valeurs_raster(centroides, raster_ndwi)
 
         # 4. Filtre combiné de biomasse et élimination stricte des surfaces maritimes/eau
-        # L'eau libre et les zones marines côtières présentent systématiquement un NDWI >= 0
         logger.info(f"Application des filtres biophysiques (NDVI >= {seuil_ndvi_min} & NDWI < {seuil_ndwi_max})...")
         
         masque_terrestre = (
@@ -117,7 +116,24 @@ def generer_carte_risques_ciblee(
         probabilites = modele_xgb.predict_proba(X_pred)[:, 1]
         gdf_combustible["risque_prob"] = (probabilites * 100).round(1)
 
-        # 8. Seuils de vigilance opérationnelle
+        # 8. Filtrage géographique strict de sécurité (Bounding Box terrestre Tunisie)
+        logger.info("Application du masque géographique de délimitation territoriale...")
+        
+        # Extraction temporaire des coordonnées centroïdes pour filtrage
+        gdf_temp_proj = gdf_combustible.to_crs(epsg=32632)
+        centroides_temp = gdf_temp_proj.geometry.centroid.to_crs(gdf_combustible.crs)
+        temp_lon = centroides_temp.x
+        temp_lat = centroides_temp.y
+
+        masque_geographique = (
+            (temp_lat >= 30.2) &
+            (temp_lat <= 37.4) &
+            (temp_lon >= 7.5) &
+            (temp_lon <= 11.6)
+        )
+        gdf_combustible = gdf_combustible[masque_geographique].copy()
+
+        # 9. Seuils de vigilance opérationnelle
         gdf_alertes = gdf_combustible[gdf_combustible["risque_prob"] >= seuil_risque_min].copy()
 
         conditions = [
@@ -128,9 +144,9 @@ def generer_carte_risques_ciblee(
         classes_vigilance = ["Alerte Rouge (Extrême)", "Alerte Orange (Élevé)", "Vigilance Jaune (Modéré)"]
         gdf_alertes["niveau_vigilance"] = np.select(conditions, classes_vigilance, default="Indéterminé")
 
-        logger.info(f"Foyers potentiels retenus après seuillage : {len(gdf_alertes):,} mailles.")
+        logger.info(f"Foyers potentiels retenus après seuillage géographique : {len(gdf_alertes):,} mailles.")
 
-        # 9. Export CSV pour l'application front-end React / Vite
+        # 10. Export CSV pour l'application front-end React / Vite
         logger.info("Conversion des géométries en points simples (CSV) pour le tableau de bord...")
         
         gdf_alertes_proj = gdf_alertes.to_crs(epsg=32632)
