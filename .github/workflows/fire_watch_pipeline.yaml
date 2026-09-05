@@ -39,7 +39,10 @@ jobs:
           # 1. Collecte automatisée des anomalies thermiques actives (FIRMS) et données météo
           python Run_Automation_Pipeline.py
           
-          # 2. Inférence du modèle XGBoost et export CSV des zones en alerte
+          # 2. Téléchargement et calcul de la biomasse géobotanique (NDVI/NDWI via MODIS)
+          python telecharger_biomasse_actuelle.py
+          
+          # 3. Inférence du modèle XGBoost et export CSV des zones en alerte
           python vegetation_modele_reel.py
 
       - name: Commit et Push de la carte prédictive allégée

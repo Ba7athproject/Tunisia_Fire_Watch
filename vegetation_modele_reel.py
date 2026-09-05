@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import xgboost as xgb
+import glob
 
 # Configuration de la journalisation pour la traçabilité de l'investigation
 logging.basicConfig(
@@ -116,12 +117,24 @@ def generer_carte_risques_ciblee(
 
 
 if __name__ == "__main__":
+    import glob
+    
+    # Recherche dynamique de la dernière grille météo générée
+    fichiers_grille = glob.glob("grille_meteo_previsionnelle_*.geojson")
+    
+    if not fichiers_grille:
+        logger.error("Aucune grille météo trouvée. Vérifiez Run_Automation_Pipeline.py.")
+        exit(1)
+        
+    # Trie par ordre alphabétique/date et prend le dernier
+    fichier_grille_jour = sorted(fichiers_grille)[-1]
+    
     generer_carte_risques_ciblee(
-        fichier_grille="grille_meteo_previsionnelle_20260901.geojson",
+        fichier_grille=fichier_grille_jour,
         raster_ndvi="tunisie_ndvi_actuel.tif",
         raster_ndwi="tunisie_ndwi_actuel.tif",
-        fichier_modele="modele_xgboost_incendies_tunisie.json",
-        fichier_sortie="carte_risques_demain_reel.csv", # Format CSV exigé ici
+        fichier_modele="modele_xgboost_tunisia_fire.joblib", # Nom mis à jour selon tes logs
+        fichier_sortie="carte_risques_demain_reel.csv",
         seuil_ndvi_min=0.30,
         seuil_risque_min=65.0
     )
