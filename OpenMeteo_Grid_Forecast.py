@@ -21,7 +21,7 @@ FICHIER_SORTIE = f"grille_meteo_previsionnelle_{datetime.now().strftime('%Y%m%d'
 def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
     """
     Module 1 : Réduction de la résolution spatiale avec filtre géographique strict.
-    Exclut le sud désertique pour diviser la charge réseau.
+    Exclut le sud désertique pour diviser la charge réseau, tout en figeant l'index spatial.
     """
     logging.info("Calcul des centroïdes et réduction de la résolution spatiale...")
     
@@ -29,19 +29,15 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
     gdf_proj = gdf_grille.to_crs(epsg=32632)
     centroides = gdf_proj.geometry.centroid.to_crs(epsg=4326)
     
+    # Conservation stricte de l'index d'origine pour éviter le désalignement spatial ultérieur
     df_coords = pd.DataFrame({
         'lat_meteo': np.round(centroides.y, 1),
         'lon_meteo': np.round(centroides.x, 1)
-    })
+    }, index=gdf_grille.index)
     
-    # Filtre géographique : Nord et Dorsale uniquement
-    taille_avant = len(df_coords)
-    df_coords = df_coords[df_coords['lat_meteo'] >= 34.2].copy()
-    taille_apres = len(df_coords)
+    # Filtre OSINT : Conservation exclusive du Nord et de la Dorsale
+    points_uniques = df_coords[df_coords['lat_meteo'] >= 34.2].drop_duplicates().reset_index(drop=True)
     
-    logging.info(f"Filtre géographique appliqué : {taille_avant - taille_apres} points sahariens ignorés.")
-    
-    points_uniques = df_coords.drop_duplicates().reset_index(drop=True)
     logging.info(f"✔ Stations météorologiques et topographiques cibles : {len(points_uniques)}.")
     
     return points_uniques, df_coords
@@ -50,7 +46,6 @@ def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> tuple:
 def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5) -> pd.DataFrame:
     """
     Module 2A : Interroge l'API Open-Meteo Elevation par ultra-petits lots (5 points).
-    Évite les erreurs 414 (URI Too Long) et garantit la stabilité de l'extraction.
     """
     url = "https://api.open-meteo.com/v1/elevation"
     altitudes_totales = []
@@ -58,7 +53,6 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
     logging.info(f"Début de l'extraction topographique réelle pour {len(points_uniques)} points (lots de {batch_size})...")
 
     session = requests.Session()
-    # Configuration des tentatives de reconnexion en cas d'échec réseau
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
@@ -79,7 +73,7 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
             response.raise_for_status()
             data = response.json()
             
-            # Parsing sécurisé de la structure de réponse JSON
+            # Gestion robuste du parsing JSON
             if isinstance(data, dict):
                 elevations = data.get('elevation', [])
                 if isinstance(elevations, (int, float)):
@@ -89,7 +83,6 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
             else:
                 elevations = []
 
-            # Remplissage de secours si la réponse est incomplète
             if len(elevations) != len(batch):
                 elevations = [250.0] * len(batch)
                 
@@ -99,7 +92,6 @@ def recuperer_elevation_batch(points_uniques: pd.DataFrame, batch_size: int = 5)
             logging.warning(f"Erreur d'élévation sur le lot {i} : {e}. Application de 250m par défaut.")
             altitudes_totales.extend([250.0] * len(batch))
             
-        # Pause de courtoisie (rate-limiting OSINT)
         time.sleep(0.5)
 
     points_uniques = points_uniques.copy()
@@ -175,7 +167,7 @@ def requeter_open_meteo_batch(points_uniques: pd.DataFrame, batch_size: int = 10
 
 def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     """
-    Module 3 : Orchestration et propagation des données météo et topographiques.
+    Module 3 : Orchestration et propagation des données avec maintien de l'intégrité matricielle.
     """
     if not os.path.exists(chemin_grille):
         logging.error(f"ERREUR CRITIQUE : Fichier de grille introuvable : '{chemin_grille}'.")
@@ -184,35 +176,37 @@ def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     logging.info(f"Chargement du maillage spatial : {chemin_grille}")
     gdf_grille = gpd.read_file(chemin_grille)
     
-    # 1. Extraction des points uniques
-    points_uniques, df_mapping = extraire_points_meteo_uniques(gdf_grille)
+    # 1. Extraction avec index original verrouillé
+    points_uniques, df_coords = extraire_points_meteo_uniques(gdf_grille)
     
-    # 2. Récupération Topographique (Forçage strict du lot à 5)
+    # 2. Récupération des données API
     points_uniques = recuperer_elevation_batch(points_uniques, batch_size=5)
-    
-    # 3. Récupération Météorologique
     df_meteo = requeter_open_meteo_batch(points_uniques, batch_size=10)
     
     if df_meteo.empty:
         logging.error("Aucune donnée météo exploitable récupérée. Arrêt.")
         exit(1)
         
-    # Fusion des données sur les centroïdes uniques
+    # Fusion des points uniques
     df_complet_uniques = points_uniques.merge(df_meteo, on=['lat_meteo', 'lon_meteo'], how='left')
     
-    logging.info("Propagation des données météo et topographiques sur la grille fine (1km)...")
+    logging.info("Propagation des données sur la grille fine avec verrouillage spatial...")
     
-    df_complet_uniques.ffill(inplace=True)
-    df_enrichi = df_mapping.merge(df_complet_uniques, on=['lat_meteo', 'lon_meteo'], how='left')
+    # CORRECTION CRITIQUE : reset_index() et set_index() assurent que chaque valeur retourne à la bonne maille
+    df_enrichi = df_coords.reset_index().merge(
+        df_complet_uniques, 
+        on=['lat_meteo', 'lon_meteo'], 
+        how='left'
+    ).set_index('index')
     
-    # Comblement des valeurs manquantes potentielles (sécurité XGBoost)
+    # Nettoyage des éventuels NaN pour garantir l'exécution de XGBoost
     df_enrichi['t_max'] = df_enrichi['t_max'].fillna(35.0)
     df_enrichi['h_mean'] = df_enrichi['h_mean'].fillna(50.0)
     df_enrichi['wind_max'] = df_enrichi['wind_max'].fillna(15.0)
     df_enrichi['precip_sum'] = df_enrichi['precip_sum'].fillna(0.0)
     df_enrichi['elevation_m'] = df_enrichi['elevation_m'].fillna(250.0)
     
-    # Injection dans le GeoDataFrame final
+    # Assignation 1:1 vers la grille
     gdf_grille['t_max'] = df_enrichi['t_max']
     gdf_grille['h_mean'] = df_enrichi['h_mean']
     gdf_grille['wind_max'] = df_enrichi['wind_max']
