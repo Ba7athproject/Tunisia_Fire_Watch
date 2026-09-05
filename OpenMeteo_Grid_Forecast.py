@@ -12,9 +12,9 @@ from datetime import datetime
 # -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-DOSSIER_PROJET = r"C:\Ba7ath_project\Tunisia-fire-detection"
-FICHIER_GRILLE = os.path.join(DOSSIER_PROJET, "grille_tunisie_1km.geojson")
-FICHIER_SORTIE = os.path.join(DOSSIER_PROJET, f"grille_meteo_previsionnelle_{datetime.now().strftime('%Y%m%d')}.geojson")
+# Chemins relatifs pointant vers la racine du projet
+FICHIER_GRILLE = "grille_tunisie_1km.geojson"
+FICHIER_SORTIE = f"grille_meteo_previsionnelle_{datetime.now().strftime('%Y%m%d')}.geojson"
 
 def extraire_points_meteo_uniques(gdf_grille: gpd.GeoDataFrame) -> pd.DataFrame:
     """
