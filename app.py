@@ -53,7 +53,7 @@ def load_realtime_data():
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data
+@st.cache_data(ttl=3600)  # Le cache sera vidé toutes les heures
 def load_prediction_data():
     """Chargement ultra-rapide des alertes prédictives via format tabulaire (CSV)."""
     fichier_pred = "carte_risques_demain_reel.csv"
