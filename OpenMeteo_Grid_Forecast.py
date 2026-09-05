@@ -191,8 +191,8 @@ def integrer_meteo_au_maillage(chemin_grille: str, chemin_sortie: str):
     # 1. Extraction des points uniques et filtrage géographique
     points_uniques, df_mapping = extraire_points_meteo_uniques(gdf_grille)
     
-    # 2. Récupération de l'élévation réelle via l'API Open-Meteo Elevation
-    points_uniques = recuperer_elevation_batch(points_uniques, batch_size=100)
+    # 2. Récupération de l'élévation réelle via l'API Open-Meteo Elevation (CORRECTION ICI)
+    points_uniques = recuperer_elevation_batch(points_uniques, batch_size=5)
     
     # 3. Récupération de la météo prévisionnelle
     df_meteo = requeter_open_meteo_batch(points_uniques, batch_size=10)
