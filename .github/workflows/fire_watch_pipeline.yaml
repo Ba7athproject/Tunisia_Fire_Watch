@@ -60,8 +60,11 @@ jobs:
           # Indexation exclusive de la matrice de risques allégée
           git add carte_risques_demain_reel.csv
           
-          # Validation silencieuse (évite que le pipeline plante si aucun changement n'est détecté)
+          # Validation silencieuse (éviter que le pipeline plante si aucun changement n'est détecté)
           git commit -m "🤖 Mise à jour automatique de la matrice de risque (XGBoost)" || echo "Aucune modification de la carte détectée"
           
+          # Récupération des dernières modifications locales pour éviter les conflits
+          git pull --rebase origin main
+
           # Envoi des données vers le dépôt pour déclencher l'actualisation de l'interface Streamlit
           git push
