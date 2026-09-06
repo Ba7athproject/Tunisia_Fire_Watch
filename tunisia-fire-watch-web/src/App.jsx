@@ -1,10 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import DeckGL from '@deck.gl/react';
 import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
-import Map from 'react-map-gl/maplibre';
-import 'maplibre-gl/dist/maplibre-gl.css';
 import Papa from 'papaparse';
 import { createClient } from '@supabase/supabase-js';
+
+// 1. Importation propre de MapLibre (import par défaut, pas d'étoile)
+import Map from 'react-map-gl/maplibre';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+
+// 2. Configuration sécurisée du Worker (évite les erreurs text/html et ASSIGN_TO_IMPORT sur Vercel)
+maplibregl.setWorkerUrl("https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl-csp-worker.js");
 
 // Configuration Supabase pour l'accès public (lecture seule via RLS)
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -47,7 +53,7 @@ export default function App() {
       try {
         setLoading(true);
 
-        // 1. Ingestion de la matrice prédictive (XGBoost)
+        // Ingestion de la matrice prédictive (XGBoost)
         const csvResponse = await fetch(GITHUB_CSV_URL);
         if (csvResponse.ok) {
           const csvText = await csvResponse.text();
@@ -59,7 +65,7 @@ export default function App() {
           });
         }
 
-        // 2. Ingestion des anomalies actives en temps réel (NASA FIRMS via Supabase)
+        // Ingestion des anomalies actives en temps réel (NASA FIRMS via Supabase)
         const { data: firmsData, error: supabaseError } = await supabase
           .from('foyers_actifs')
           .select('latitude, longitude, frp, confidence, gouvernorat')
@@ -72,7 +78,6 @@ export default function App() {
         if (!supabaseError && firmsData) {
           setRealtimeData(firmsData);
         }
-
       } catch (err) {
         console.error("Erreur d'ingestion des données OSINT :", err);
       } finally {
@@ -83,29 +88,12 @@ export default function App() {
     fetchAllData();
   }, []);
 
-  // Gestionnaires pour les boutons de navigation (Zoom In / Zoom Out / Reset)
-  const handleZoomIn = () => {
-    setViewState(prev => ({
-      ...prev,
-      zoom: Math.min(prev.zoom + 1, 14)
-    }));
-  };
+  const handleZoomIn = () => setViewState(prev => ({ ...prev, zoom: Math.min(prev.zoom + 1, 14) }));
+  const handleZoomOut = () => setViewState(prev => ({ ...prev, zoom: Math.max(prev.zoom - 1, 4) }));
+  const handleResetView = () => setViewState(INITIAL_VIEW_STATE);
 
-  const handleZoomOut = () => {
-    setViewState(prev => ({
-      ...prev,
-      zoom: Math.max(prev.zoom - 1, 4)
-    }));
-  };
-
-  const handleResetView = () => {
-    setViewState(INITIAL_VIEW_STATE);
-  };
-
-  // Filtrage dynamique selon le seuil de vigilance IA
   const filteredPredictions = predictionData.filter(d => (d.risque_prob || 0) >= seuilRisque);
 
-  // Calque d'alerte prédictive 3D (XGBoost)
   const predictionLayer = new ColumnLayer({
     id: 'prediction-layer',
     data: filteredPredictions,
@@ -124,7 +112,6 @@ export default function App() {
     }
   });
 
-  // Calque des anomalies actives (FIRMS / VIIRS / MODIS)
   const realtimeLayer = new ScatterplotLayer({
     id: 'realtime-layer',
     data: realtimeData,
@@ -143,7 +130,8 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-screen bg-slate-950 overflow-hidden font-sans">
-      {/* Panneau de contrôle et monitoring OSINT */}
+
+      {/* Panneau de contrôle */}
       <div className="absolute top-4 left-4 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-700/60 p-5 rounded-xl text-white shadow-2xl w-80">
         <h1 className="text-lg font-bold flex items-center gap-2 text-rose-500">
           <span>🔥</span> Tunisia Fire Watch
@@ -159,10 +147,7 @@ export default function App() {
               <span className="text-rose-400">{seuilRisque}%</span>
             </div>
             <input
-              type="range"
-              min="60"
-              max="95"
-              value={seuilRisque}
+              type="range" min="60" max="95" value={seuilRisque}
               onChange={(e) => setSeuilRisque(Number(e.target.value))}
               className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500"
             />
@@ -179,39 +164,17 @@ export default function App() {
           </div>
         </div>
 
-        {loading && (
-          <div className="mt-3 text-xs text-cyan-400 animate-pulse">
-            Synchronisation des flux géospatiaux...
-          </div>
-        )}
+        {loading && <div className="mt-3 text-xs text-cyan-400 animate-pulse">Synchronisation...</div>}
       </div>
 
-      {/* Boutons de navigation cartographique (Zoom In / Zoom Out / Reset) */}
+      {/* Contrôles de navigation */}
       <div className="absolute top-4 right-4 z-20 flex flex-col bg-slate-900/90 backdrop-blur-md border border-slate-700/60 rounded-xl shadow-2xl overflow-hidden">
-        <button
-          onClick={handleZoomIn}
-          title="Zoomer"
-          className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700"
-        >
-          +
-        </button>
-        <button
-          onClick={handleZoomOut}
-          title="Dézoomer"
-          className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700"
-        >
-          -
-        </button>
-        <button
-          onClick={handleResetView}
-          title="Réinitialiser la vue (Tunisie)"
-          className="w-10 h-10 flex items-center justify-center text-rose-400 hover:bg-slate-800 transition active:bg-slate-700 text-xs"
-        >
-          🏠
-        </button>
+        <button onClick={handleZoomIn} className="w-10 h-10 text-white font-bold hover:bg-slate-800 border-b border-slate-700/60">+</button>
+        <button onClick={handleZoomOut} className="w-10 h-10 text-white font-bold hover:bg-slate-800 border-b border-slate-700/60">-</button>
+        <button onClick={handleResetView} className="w-10 h-10 hover:bg-slate-800 text-xs">🏠</button>
       </div>
 
-      {/* Moteur cartographique 3D Deck.gl + MapLibre */}
+      {/* Moteur cartographique */}
       <div className="absolute inset-0 w-full h-full z-0">
         <DeckGL
           viewState={viewState}
@@ -220,8 +183,6 @@ export default function App() {
           layers={[predictionLayer, realtimeLayer]}
           getTooltip={({ object }) => {
             if (!object) return null;
-
-            // 1. Si c'est une zone prédictive XGBoost (colonnes 3D)
             if (object.risque_prob !== undefined) {
               return {
                 html: `
@@ -232,11 +193,7 @@ export default function App() {
                     <div>📍 Coordonnées : <b>${Number(object.lat).toFixed(3)}, ${Number(object.lon).toFixed(3)}</b></div>
                     <div>⛰️ Altitude réelle : <b>${object.elevation_m ?? '-'} m</b></div>
                     <div>🌡️ Température max : <b>${object.t_max ?? '-'} °C</b></div>
-                    <div>💧 Humidité relative : <b>${object.h_mean ?? '-'} %</b></div>
                     <div>💨 Vitesse du vent : <b>${object.wind_max ?? '-'} km/h</b></div>
-                    <div>🌧️ Précipitations : <b>${object.precip_sum ?? 0} mm</b></div>
-                    ${object.ndvi !== undefined ? `<div>🌿 Biomasse (NDVI) : <b>${Number(object.ndvi).toFixed(2)}</b></div>` : ''}
-                    ${object.ndwi !== undefined ? `<div>💦 Stress hydrique (NDWI) : <b>${Number(object.ndwi).toFixed(2)}</b></div>` : ''}
                     <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #38bdf8; font-size: 11px;">
                       Modélisation prédictive (XGBoost + MODIS)
                     </div>
@@ -244,12 +201,9 @@ export default function App() {
                 `
               };
             }
-
-            // 2. Si c'est un foyer thermique actif (NASA FIRMS / VIIRS)
             if (object.frp !== undefined) {
               const frpVal = Number(object.frp || 0);
               const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
-
               return {
                 html: `
                   <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #e11d48; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
@@ -257,16 +211,7 @@ export default function App() {
                       🔥 Foyer Actif Détecté (NASA FIRMS)
                     </div>
                     <div>📍 Gouvernorat : <b>${object.gouvernorat || 'Secteur forestier'}</b></div>
-                    <div>⚡ Puissance radiative (FRP) : <b>${object.frp} MW (${severityText})</b></div>
-                    <div>🛡️ Indice de confiance : <b>${formatConfidence(object.confidence)}</b></div>
-                    <div>🛰️ Coordonnées GPS : <b>${Number(object.latitude).toFixed(4)}, ${Number(object.longitude).toFixed(4)}</b></div>
-                    
-                    <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #e11d48; color: #cbd5e1; font-size: 11px;">
-                      <div>🌡️ Température estimée : <b>${object.t_max ?? '35.0'} °C</b></div>
-                      <div>💨 Vent de zone : <b>${object.wind_max ?? '15.0'} km/h</b></div>
-                      <div>🌿 Végétation (NDVI) : <b>${object.ndvi ?? '0.45'}</b></div>
-                    </div>
-
+                    <div>⚡ Puissance radiative : <b>${object.frp} MW (${severityText})</b></div>
                     <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #fb7185; font-size: 11px;">
                       Surveillance satellitaire en temps réel (VIIRS / MODIS)
                     </div>
@@ -276,7 +221,9 @@ export default function App() {
             }
           }}
         >
+          {/* 3. Injection explicite de l'instance mapLibre configurée pour afficher les tuiles */}
           <Map
+            mapLib={maplibregl}
             reuseMaps
             style={{ width: '100%', height: '100%' }}
             mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
