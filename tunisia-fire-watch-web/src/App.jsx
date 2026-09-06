@@ -4,20 +4,25 @@ import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
 import Papa from 'papaparse';
 import { createClient } from '@supabase/supabase-js';
 
-// Importation exclusive du wrapper React et de son CSS.
-// react-map-gl gère nativement l'instanciation sans conflit avec Vercel/Vite.
+// Importation exclusive de react-map-gl/maplibre pour une intégration propre sous Vite/Vercel
 import Map from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-// Configuration Supabase pour l'accès public (lecture seule via RLS)
+// -------------------------------------------------------------------------
+// CONFIGURATION SUPABASE (OSINT / Open Data)
+// -------------------------------------------------------------------------
+// Accès en lecture seule garanti par les politiques RLS de Supabase
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// URL brute du flux CSV généré quotidiennement par le pipeline GitHub Actions
+// -------------------------------------------------------------------------
+// SOURCES DE DONNÉES
+// -------------------------------------------------------------------------
+// Flux CSV automatisé attestant de l'intégrité de la chaîne de vérification
 const GITHUB_CSV_URL = "https://raw.githubusercontent.com/Ba7athproject/Tunisia_Fire_Watch/main/carte_risques_demain_reel.csv";
 
-// Centrage initial sur le territoire tunisien avec perspective 3D
+// Cadrage cartographique initial sur le territoire tunisien
 const INITIAL_VIEW_STATE = {
   longitude: 9.5375,
   latitude: 35.5,
@@ -26,7 +31,10 @@ const INITIAL_VIEW_STATE = {
   bearing: 0
 };
 
-// Fonction de conversion normalisée pour la confiance satellitaire (VIIRS vs MODIS)
+// -------------------------------------------------------------------------
+// UTILITAIRES
+// -------------------------------------------------------------------------
+// Normalisation des indices de confiance (différences entre capteurs VIIRS et MODIS)
 const formatConfidence = (conf) => {
   if (conf === null || conf === undefined || conf === '') return 'Non renseigné';
   const c = String(conf).trim().toLowerCase();
@@ -37,30 +45,37 @@ const formatConfidence = (conf) => {
 };
 
 export default function App() {
+  // États de l'application
   const [predictionData, setPredictionData] = useState([]);
   const [realtimeData, setRealtimeData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [seuilRisque, setSeuilRisque] = useState(70);
+
+  // État contrôlé de la caméra : essentiel pour synchroniser Deck.gl et MapLibre
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
+  // -------------------------------------------------------------------------
+  // INGESTION DES DONNÉES (Fetch & Parsing)
+  // -------------------------------------------------------------------------
   useEffect(() => {
     const fetchAllData = async () => {
       try {
         setLoading(true);
 
-        // 1. Ingestion de la matrice prédictive (XGBoost)
+        // 1. Modélisation Prédictive (XGBoost)
         const csvResponse = await fetch(GITHUB_CSV_URL);
-        if (csvResponse.ok) {
-          const csvText = await csvResponse.text();
-          Papa.parse(csvText, {
-            header: true,
-            dynamicTyping: true,
-            skipEmptyLines: true,
-            complete: (results) => setPredictionData(results.data)
-          });
-        }
+        if (!csvResponse.ok) throw new Error(`Erreur HTTP: ${csvResponse.status}`);
 
-        // 2. Ingestion des anomalies actives en temps réel (NASA FIRMS via Supabase)
+        const csvText = await csvResponse.text();
+        Papa.parse(csvText, {
+          header: true,
+          dynamicTyping: true,
+          skipEmptyLines: true,
+          complete: (results) => setPredictionData(results.data),
+          error: (err) => console.error("Erreur de parsing CSV :", err)
+        });
+
+        // 2. Alertes Thermiques Temps Réel (FIRMS)
         const { data: firmsData, error: supabaseError } = await supabase
           .from('foyers_actifs')
           .select('latitude, longitude, frp, confidence, gouvernorat')
@@ -70,12 +85,11 @@ export default function App() {
           .lte('longitude', 11.6)
           .order('acq_date', { ascending: false });
 
-        if (!supabaseError && firmsData) {
-          setRealtimeData(firmsData);
-        }
+        if (supabaseError) throw supabaseError;
+        if (firmsData) setRealtimeData(firmsData);
 
       } catch (err) {
-        console.error("Erreur d'ingestion des données OSINT :", err);
+        console.error("Échec critique lors de l'ingestion des flux de données :", err);
       } finally {
         setLoading(false);
       }
@@ -84,15 +98,18 @@ export default function App() {
     fetchAllData();
   }, []);
 
-  // Gestionnaires pour les boutons de navigation
+  // -------------------------------------------------------------------------
+  // CONTRÔLES DE NAVIGATION
+  // -------------------------------------------------------------------------
   const handleZoomIn = () => setViewState(prev => ({ ...prev, zoom: Math.min(prev.zoom + 1, 14) }));
   const handleZoomOut = () => setViewState(prev => ({ ...prev, zoom: Math.max(prev.zoom - 1, 4) }));
   const handleResetView = () => setViewState(INITIAL_VIEW_STATE);
 
-  // Filtrage dynamique selon le seuil de vigilance IA
+  // -------------------------------------------------------------------------
+  // CONSTRUCTION DES CALQUES WEBGL (Deck.gl)
+  // -------------------------------------------------------------------------
   const filteredPredictions = predictionData.filter(d => (d.risque_prob || 0) >= seuilRisque);
 
-  // Calque d'alerte prédictive 3D (XGBoost)
   const predictionLayer = new ColumnLayer({
     id: 'prediction-layer',
     data: filteredPredictions,
@@ -111,7 +128,6 @@ export default function App() {
     }
   });
 
-  // Calque des anomalies actives (FIRMS / VIIRS / MODIS)
   const realtimeLayer = new ScatterplotLayer({
     id: 'realtime-layer',
     data: realtimeData,
@@ -128,10 +144,13 @@ export default function App() {
     getRadius: d => Math.max((d.frp || 10) * 1.5, 300),
   });
 
+  // -------------------------------------------------------------------------
+  // INTERFACE UTILISATEUR & RENDU
+  // -------------------------------------------------------------------------
   return (
     <div className="relative w-screen h-screen bg-slate-950 overflow-hidden font-sans">
 
-      {/* Panneau de contrôle et monitoring OSINT */}
+      {/* HUD : Monitoring OSINT */}
       <div className="absolute top-4 left-4 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-700/60 p-5 rounded-xl text-white shadow-2xl w-80">
         <h1 className="text-lg font-bold flex items-center gap-2 text-rose-500">
           <span>🔥</span> Tunisia Fire Watch
@@ -171,14 +190,14 @@ export default function App() {
         )}
       </div>
 
-      {/* Boutons de navigation cartographique */}
+      {/* HUD : Navigation Cartographique */}
       <div className="absolute top-4 right-4 z-20 flex flex-col bg-slate-900/90 backdrop-blur-md border border-slate-700/60 rounded-xl shadow-2xl overflow-hidden">
         <button onClick={handleZoomIn} title="Zoomer" className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700">+</button>
         <button onClick={handleZoomOut} title="Dézoomer" className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700">-</button>
         <button onClick={handleResetView} title="Réinitialiser la vue (Tunisie)" className="w-10 h-10 flex items-center justify-center text-rose-400 hover:bg-slate-800 transition active:bg-slate-700 text-xs">🏠</button>
       </div>
 
-      {/* Moteur cartographique 3D Deck.gl + MapLibre */}
+      {/* Rendu principal WebGL : Superposition des données et du fond de carte */}
       <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 0 }}>
         <DeckGL
           viewState={viewState}
@@ -188,7 +207,7 @@ export default function App() {
           getTooltip={({ object }) => {
             if (!object) return null;
 
-            // 1. Info-bulle pour les colonnes XGBoost
+            // Info-bulle : Colonnes XGBoost
             if (object.risque_prob !== undefined) {
               return {
                 html: `
@@ -212,12 +231,11 @@ export default function App() {
               };
             }
 
-            // 2. Info-bulle pour les foyers FIRMS (Avec Jointure Spatiale OSINT)
+            // Info-bulle : Foyers FIRMS avec jointure spatiale
             if (object.frp !== undefined) {
               const frpVal = Number(object.frp || 0);
               const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
 
-              // Algorithme OSINT : Recherche de la maille météo/XGBoost la plus proche géographiquement
               let meteoProche = null;
               if (predictionData && predictionData.length > 0) {
                 let minDistance = Infinity;
@@ -260,11 +278,16 @@ export default function App() {
             }
           }}
         >
-          {/* L'intégration native sans dépendance externe conflictuelle */}
+          {/* 
+            LE FIX EST ICI :
+            L'opérateur spread {...viewState} transmet les coordonnées de la caméra (Lat 35, Lon 9)
+            de Deck.gl vers MapLibre. Sans cela, MapLibre reste centré à Lat 0, Lon 0 (Océan Atlantique),
+            ce qui explique le fond totalement noir.
+          */}
           <Map
+            {...viewState}
+            reuseMaps
             mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
-            onLoad={() => console.log("Fond de carte MapLibre chargé avec succès !")}
-            onError={(e) => console.error("Erreur MapLibre :", e)}
           />
         </DeckGL>
       </div>
