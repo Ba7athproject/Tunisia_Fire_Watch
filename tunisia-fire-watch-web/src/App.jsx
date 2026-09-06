@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import DeckGL from '@deck.gl/react';
 import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
 import Map from 'react-map-gl/maplibre';
@@ -213,76 +213,78 @@ export default function App() {
       </div>
 
       {/* Moteur cartographique 3D Deck.gl + MapLibre */}
-      <DeckGL
-        viewState={viewState}
-        onViewStateChange={e => setViewState(e.viewState)}
-        controller={true}
-        layers={[predictionLayer, realtimeLayer]}
-        getTooltip={({ object }) => {
-          if (!object) return null;
+      <div className="absolute inset-0 w-full h-full -z-10">
+        <DeckGL
+          viewState={viewState}
+          onViewStateChange={e => setViewState(e.viewState)}
+          controller={true}
+          layers={[predictionLayer, realtimeLayer]}
+          getTooltip={({ object }) => {
+            if (!object) return null;
 
-          // 1. Si c'est une zone prédictive XGBoost (colonnes 3D)
-          if (object.risque_prob !== undefined) {
-            return {
-              html: `
-                <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
-                  <div style="font-weight: bold; color: #fb7185; border-bottom: 1px solid #334155; padding-bottom: 4px; margin-bottom: 6px;">
-                    🔥 Indice de Risque (Modèle IA) : ${Number(object.risque_prob).toFixed(1)}%
+            // 1. Si c'est une zone prédictive XGBoost (colonnes 3D)
+            if (object.risque_prob !== undefined) {
+              return {
+                html: `
+                  <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #334155; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
+                    <div style="font-weight: bold; color: #fb7185; border-bottom: 1px solid #334155; padding-bottom: 4px; margin-bottom: 6px;">
+                      🔥 Indice de Risque (Modèle IA) : ${Number(object.risque_prob).toFixed(1)}%
+                    </div>
+                    <div>📍 Coordonnées : <b>${Number(object.lat).toFixed(3)}, ${Number(object.lon).toFixed(3)}</b></div>
+                    <div>⛰️ Altitude réelle : <b>${object.elevation_m ?? '-'} m</b></div>
+                    <div>🌡️ Température max : <b>${object.t_max ?? '-'} °C</b></div>
+                    <div>💧 Humidité relative : <b>${object.h_mean ?? '-'} %</b></div>
+                    <div>💨 Vitesse du vent : <b>${object.wind_max ?? '-'} km/h</b></div>
+                    <div>🌧️ Précipitations : <b>${object.precip_sum ?? 0} mm</b></div>
+                    ${object.ndvi !== undefined ? `<div>🌿 Biomasse (NDVI) : <b>${Number(object.ndvi).toFixed(2)}</b></div>` : ''}
+                    ${object.ndwi !== undefined ? `<div>💦 Stress hydrique (NDWI) : <b>${Number(object.ndwi).toFixed(2)}</b></div>` : ''}
+                    <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #38bdf8; font-size: 11px;">
+                      Modélisation prédictive (XGBoost + MODIS)
+                    </div>
                   </div>
-                  <div>📍 Coordonnées : <b>${Number(object.lat).toFixed(3)}, ${Number(object.lon).toFixed(3)}</b></div>
-                  <div>⛰️ Altitude réelle : <b>${object.elevation_m ?? '-'} m</b></div>
-                  <div>🌡️ Température max : <b>${object.t_max ?? '-'} °C</b></div>
-                  <div>💧 Humidité relative : <b>${object.h_mean ?? '-'} %</b></div>
-                  <div>💨 Vitesse du vent : <b>${object.wind_max ?? '-'} km/h</b></div>
-                  <div>🌧️ Précipitations : <b>${object.precip_sum ?? 0} mm</b></div>
-                  ${object.ndvi !== undefined ? `<div>🌿 Biomasse (NDVI) : <b>${Number(object.ndvi).toFixed(2)}</b></div>` : ''}
-                  ${object.ndwi !== undefined ? `<div>💦 Stress hydrique (NDWI) : <b>${Number(object.ndwi).toFixed(2)}</b></div>` : ''}
-                  <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #38bdf8; font-size: 11px;">
-                    Modélisation prédictive (XGBoost + MODIS)
-                  </div>
-                </div>
-              `
-            };
-          }
+                `
+              };
+            }
 
-          // 2. Si c'est un foyer thermique actif (NASA FIRMS / VIIRS)
-          if (object.frp !== undefined) {
-            const frpVal = Number(object.frp || 0);
-            const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
+            // 2. Si c'est un foyer thermique actif (NASA FIRMS / VIIRS)
+            if (object.frp !== undefined) {
+              const frpVal = Number(object.frp || 0);
+              const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
 
-            return {
-              html: `
-                <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #e11d48; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
-                  <div style="font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e11d48; padding-bottom: 4px; margin-bottom: 6px;">
-                    🔥 Foyer Actif Détecté (NASA FIRMS)
-                  </div>
-                  <div>📍 Gouvernorat : <b>${object.gouvernorat || 'Secteur forestier'}</b></div>
-                  <div>⚡ Puissance radiative (FRP) : <b>${object.frp} MW (${severityText})</b></div>
-                  <div>🛡️ Indice de confiance : <b>${formatConfidence(object.confidence)}</b></div>
-                  <div>🛰️ Coordonnées GPS : <b>${Number(object.latitude).toFixed(4)}, ${Number(object.longitude).toFixed(4)}</b></div>
-                  
-                  <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #e11d48; color: #cbd5e1; font-size: 11px;">
-                    <div>🌡️ Température estimée : <b>${object.t_max ?? '35.0'} °C</b></div>
-                    <div>💨 Vent de zone : <b>${object.wind_max ?? '15.0'} km/h</b></div>
-                    <div>🌿 Végétation (NDVI) : <b>${object.ndvi ?? '0.45'}</b></div>
-                  </div>
+              return {
+                html: `
+                  <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #e11d48; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
+                    <div style="font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e11d48; padding-bottom: 4px; margin-bottom: 6px;">
+                      🔥 Foyer Actif Détecté (NASA FIRMS)
+                    </div>
+                    <div>📍 Gouvernorat : <b>${object.gouvernorat || 'Secteur forestier'}</b></div>
+                    <div>⚡ Puissance radiative (FRP) : <b>${object.frp} MW (${severityText})</b></div>
+                    <div>🛡️ Indice de confiance : <b>${formatConfidence(object.confidence)}</b></div>
+                    <div>🛰️ Coordonnées GPS : <b>${Number(object.latitude).toFixed(4)}, ${Number(object.longitude).toFixed(4)}</b></div>
+                    
+                    <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #e11d48; color: #cbd5e1; font-size: 11px;">
+                      <div>🌡️ Température estimée : <b>${object.t_max ?? '35.0'} °C</b></div>
+                      <div>💨 Vent de zone : <b>${object.wind_max ?? '15.0'} km/h</b></div>
+                      <div>🌿 Végétation (NDVI) : <b>${object.ndvi ?? '0.45'}</b></div>
+                    </div>
 
-                  <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #fb7185; font-size: 11px;">
-                    Surveillance satellitaire en temps réel (VIIRS / MODIS)
+                    <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #fb7185; font-size: 11px;">
+                      Surveillance satellitaire en temps réel (VIIRS / MODIS)
+                    </div>
                   </div>
-                </div>
-              `
-            };
-          }
-        }}
-      >
-        <Map
-          mapLib={maplibregl}
-          reuseMaps
-          style={{ width: '100%', height: '100%' }}
-          mapStyle="https://tiles.openfreemap.org/styles/dark"
-        />
-      </DeckGL>
+                `
+              };
+            }
+          }}
+        >
+          <Map
+            mapLib={maplibregl}
+            reuseMaps
+            style={{ width: '100%', height: '100%' }}
+            mapStyle="https://tiles.openfreemap.org/styles/dark"
+          />
+        </DeckGL>
+      </div>
     </div>
   );
 }
