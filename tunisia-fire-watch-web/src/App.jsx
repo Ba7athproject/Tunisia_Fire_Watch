@@ -4,25 +4,22 @@ import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
 import Papa from 'papaparse';
 import { createClient } from '@supabase/supabase-js';
 
-// Importation exclusive de react-map-gl/maplibre pour une intégration propre sous Vite/Vercel
+// Importation native du composant React pour MapLibre
 import Map from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 // -------------------------------------------------------------------------
 // CONFIGURATION SUPABASE (OSINT / Open Data)
 // -------------------------------------------------------------------------
-// Accès en lecture seule garanti par les politiques RLS de Supabase
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // -------------------------------------------------------------------------
-// SOURCES DE DONNÉES
+// SOURCES DE DONNÉES & CONFIGURATION CARTOGRAPHIQUE
 // -------------------------------------------------------------------------
-// Flux CSV automatisé attestant de l'intégrité de la chaîne de vérification
 const GITHUB_CSV_URL = "https://raw.githubusercontent.com/Ba7athproject/Tunisia_Fire_Watch/main/carte_risques_demain_reel.csv";
 
-// Cadrage cartographique initial sur le territoire tunisien
 const INITIAL_VIEW_STATE = {
   longitude: 9.5375,
   latitude: 35.5,
@@ -31,10 +28,35 @@ const INITIAL_VIEW_STATE = {
   bearing: 0
 };
 
+// Stratégie Raster OSINT : Objet cartographique autonome et gratuit.
+// Utilisation du fond ESRI Dark Gray Canvas, réputé pour sa fiabilité en datajournalisme,
+// sans filigrane ni clé d'API requise.
+const OSINT_MAP_STYLE = {
+  version: 8,
+  sources: {
+    'esri-dark': {
+      type: 'raster',
+      tiles: [
+        'https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+      ],
+      tileSize: 256,
+      attribution: 'Esri, HERE, Garmin, FAO, NOAA, USGS, © OpenStreetMap'
+    }
+  },
+  layers: [
+    {
+      id: 'esri-dark-layer',
+      type: 'raster',
+      source: 'esri-dark',
+      minzoom: 0,
+      maxzoom: 22
+    }
+  ]
+};
+
 // -------------------------------------------------------------------------
 // UTILITAIRES
 // -------------------------------------------------------------------------
-// Normalisation des indices de confiance (différences entre capteurs VIIRS et MODIS)
 const formatConfidence = (conf) => {
   if (conf === null || conf === undefined || conf === '') return 'Non renseigné';
   const c = String(conf).trim().toLowerCase();
@@ -45,18 +67,12 @@ const formatConfidence = (conf) => {
 };
 
 export default function App() {
-  // États de l'application
   const [predictionData, setPredictionData] = useState([]);
   const [realtimeData, setRealtimeData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [seuilRisque, setSeuilRisque] = useState(70);
-
-  // État contrôlé de la caméra : essentiel pour synchroniser Deck.gl et MapLibre
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
-  // -------------------------------------------------------------------------
-  // INGESTION DES DONNÉES (Fetch & Parsing)
-  // -------------------------------------------------------------------------
   useEffect(() => {
     const fetchAllData = async () => {
       try {
@@ -64,16 +80,16 @@ export default function App() {
 
         // 1. Modélisation Prédictive (XGBoost)
         const csvResponse = await fetch(GITHUB_CSV_URL);
-        if (!csvResponse.ok) throw new Error(`Erreur HTTP: ${csvResponse.status}`);
-
-        const csvText = await csvResponse.text();
-        Papa.parse(csvText, {
-          header: true,
-          dynamicTyping: true,
-          skipEmptyLines: true,
-          complete: (results) => setPredictionData(results.data),
-          error: (err) => console.error("Erreur de parsing CSV :", err)
-        });
+        if (csvResponse.ok) {
+          const csvText = await csvResponse.text();
+          Papa.parse(csvText, {
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true,
+            complete: (results) => setPredictionData(results.data),
+            error: (err) => console.error("Erreur de parsing CSV :", err)
+          });
+        }
 
         // 2. Alertes Thermiques Temps Réel (FIRMS)
         const { data: firmsData, error: supabaseError } = await supabase
@@ -85,8 +101,9 @@ export default function App() {
           .lte('longitude', 11.6)
           .order('acq_date', { ascending: false });
 
-        if (supabaseError) throw supabaseError;
-        if (firmsData) setRealtimeData(firmsData);
+        if (!supabaseError && firmsData) {
+          setRealtimeData(firmsData);
+        }
 
       } catch (err) {
         console.error("Échec critique lors de l'ingestion des flux de données :", err);
@@ -98,16 +115,11 @@ export default function App() {
     fetchAllData();
   }, []);
 
-  // -------------------------------------------------------------------------
-  // CONTRÔLES DE NAVIGATION
-  // -------------------------------------------------------------------------
   const handleZoomIn = () => setViewState(prev => ({ ...prev, zoom: Math.min(prev.zoom + 1, 14) }));
   const handleZoomOut = () => setViewState(prev => ({ ...prev, zoom: Math.max(prev.zoom - 1, 4) }));
   const handleResetView = () => setViewState(INITIAL_VIEW_STATE);
 
-  // -------------------------------------------------------------------------
-  // CONSTRUCTION DES CALQUES WEBGL (Deck.gl)
-  // -------------------------------------------------------------------------
+  // Construction des calques d'alerte
   const filteredPredictions = predictionData.filter(d => (d.risque_prob || 0) >= seuilRisque);
 
   const predictionLayer = new ColumnLayer({
@@ -144,13 +156,10 @@ export default function App() {
     getRadius: d => Math.max((d.frp || 10) * 1.5, 300),
   });
 
-  // -------------------------------------------------------------------------
-  // INTERFACE UTILISATEUR & RENDU
-  // -------------------------------------------------------------------------
   return (
     <div className="relative w-screen h-screen bg-slate-950 overflow-hidden font-sans">
 
-      {/* HUD : Monitoring OSINT */}
+      {/* Panneau de contrôle */}
       <div className="absolute top-4 left-4 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-700/60 p-5 rounded-xl text-white shadow-2xl w-80">
         <h1 className="text-lg font-bold flex items-center gap-2 text-rose-500">
           <span>🔥</span> Tunisia Fire Watch
@@ -190,14 +199,14 @@ export default function App() {
         )}
       </div>
 
-      {/* HUD : Navigation Cartographique */}
+      {/* Boutons de navigation */}
       <div className="absolute top-4 right-4 z-20 flex flex-col bg-slate-900/90 backdrop-blur-md border border-slate-700/60 rounded-xl shadow-2xl overflow-hidden">
-        <button onClick={handleZoomIn} title="Zoomer" className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700">+</button>
-        <button onClick={handleZoomOut} title="Dézoomer" className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700">-</button>
-        <button onClick={handleResetView} title="Réinitialiser la vue (Tunisie)" className="w-10 h-10 flex items-center justify-center text-rose-400 hover:bg-slate-800 transition active:bg-slate-700 text-xs">🏠</button>
+        <button onClick={handleZoomIn} className="w-10 h-10 text-white font-bold hover:bg-slate-800 border-b border-slate-700/60">+</button>
+        <button onClick={handleZoomOut} className="w-10 h-10 text-white font-bold hover:bg-slate-800 border-b border-slate-700/60">-</button>
+        <button onClick={handleResetView} className="w-10 h-10 text-rose-400 hover:bg-slate-800 text-xs">🏠</button>
       </div>
 
-      {/* Rendu principal WebGL : Superposition des données et du fond de carte */}
+      {/* Moteur cartographique 3D */}
       <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 0 }}>
         <DeckGL
           viewState={viewState}
@@ -207,7 +216,6 @@ export default function App() {
           getTooltip={({ object }) => {
             if (!object) return null;
 
-            // Info-bulle : Colonnes XGBoost
             if (object.risque_prob !== undefined) {
               return {
                 html: `
@@ -231,7 +239,6 @@ export default function App() {
               };
             }
 
-            // Info-bulle : Foyers FIRMS avec jointure spatiale
             if (object.frp !== undefined) {
               const frpVal = Number(object.frp || 0);
               const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
@@ -279,15 +286,12 @@ export default function App() {
           }}
         >
           {/* 
-            LE FIX EST ICI :
-            L'opérateur spread {...viewState} transmet les coordonnées de la caméra (Lat 35, Lon 9)
-            de Deck.gl vers MapLibre. Sans cela, MapLibre reste centré à Lat 0, Lon 0 (Océan Atlantique),
-            ce qui explique le fond totalement noir.
+            L'injection de l'objet OSINT_MAP_STYLE remplace l'URL capricieuse.
+            La balise style={{ width: '100vw', height: '100vh' }} garantit que la carte se déploie.
           */}
           <Map
-            {...viewState}
-            reuseMaps
-            mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+            mapStyle={OSINT_MAP_STYLE}
+            style={{ width: '100vw', height: '100vh' }}
           />
         </DeckGL>
       </div>
