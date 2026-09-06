@@ -56,3 +56,6 @@ grille_tunisie_1km.geojson
 anomalies_*.geojson
 dataset_*.geojson
 previsions_risque_*.geojson
+
+.vercel
+.env*.local
