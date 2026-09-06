@@ -212,7 +212,7 @@ export default function App() {
       </div>
 
       {/* Moteur cartographique 3D Deck.gl + MapLibre */}
-      <div className="absolute inset-0 w-full h-full -z-10">
+      <div className="absolute inset-0 w-full h-full z-0">
         <DeckGL
           viewState={viewState}
           onViewStateChange={e => setViewState(e.viewState)}
@@ -279,7 +279,7 @@ export default function App() {
           <Map
             reuseMaps
             style={{ width: '100%', height: '100%' }}
-            mapStyle="https://tiles.openfreemap.org/styles/dark"
+            mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
           />
         </DeckGL>
       </div>
