@@ -1,11 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import DeckGL from '@deck.gl/react';
 import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
-import Map from 'react-map-gl/maplibre';
-import * as maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
 import Papa from 'papaparse';
 import { createClient } from '@supabase/supabase-js';
+import Map from 'react-map-gl/maplibre';
+import * as maplibregl from 'maplibre-gl';
+
+import 'maplibre-gl/dist/maplibre-gl.css';
+// Redirection explicite du worker WebGL pour éviter l'erreur MIME sur Vercel
+maplibregl.workerUrl = "https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl-csp-worker.js";
+
+
 
 // Configuration Supabase pour l'accès public (lecture seule via RLS)
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
