@@ -4,13 +4,10 @@ import { ColumnLayer, ScatterplotLayer } from '@deck.gl/layers';
 import Papa from 'papaparse';
 import { createClient } from '@supabase/supabase-js';
 
-// 1. Importation propre de MapLibre (import par défaut, pas d'étoile)
+// Importation exclusive du wrapper React et de son CSS.
+// react-map-gl gère nativement l'instanciation sans conflit avec Vercel/Vite.
 import Map from 'react-map-gl/maplibre';
-import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-
-// 2. Configuration sécurisée du Worker (évite les erreurs text/html et ASSIGN_TO_IMPORT sur Vercel)
-maplibregl.setWorkerUrl("https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl-csp-worker.js");
 
 // Configuration Supabase pour l'accès public (lecture seule via RLS)
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -44,8 +41,6 @@ export default function App() {
   const [realtimeData, setRealtimeData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [seuilRisque, setSeuilRisque] = useState(70);
-
-  // État de la vue contrôlé pour permettre le zoom in/out interactif
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
   useEffect(() => {
@@ -53,7 +48,7 @@ export default function App() {
       try {
         setLoading(true);
 
-        // Ingestion de la matrice prédictive (XGBoost)
+        // 1. Ingestion de la matrice prédictive (XGBoost)
         const csvResponse = await fetch(GITHUB_CSV_URL);
         if (csvResponse.ok) {
           const csvText = await csvResponse.text();
@@ -65,7 +60,7 @@ export default function App() {
           });
         }
 
-        // Ingestion des anomalies actives en temps réel (NASA FIRMS via Supabase)
+        // 2. Ingestion des anomalies actives en temps réel (NASA FIRMS via Supabase)
         const { data: firmsData, error: supabaseError } = await supabase
           .from('foyers_actifs')
           .select('latitude, longitude, frp, confidence, gouvernorat')
@@ -78,6 +73,7 @@ export default function App() {
         if (!supabaseError && firmsData) {
           setRealtimeData(firmsData);
         }
+
       } catch (err) {
         console.error("Erreur d'ingestion des données OSINT :", err);
       } finally {
@@ -88,12 +84,15 @@ export default function App() {
     fetchAllData();
   }, []);
 
+  // Gestionnaires pour les boutons de navigation
   const handleZoomIn = () => setViewState(prev => ({ ...prev, zoom: Math.min(prev.zoom + 1, 14) }));
   const handleZoomOut = () => setViewState(prev => ({ ...prev, zoom: Math.max(prev.zoom - 1, 4) }));
   const handleResetView = () => setViewState(INITIAL_VIEW_STATE);
 
+  // Filtrage dynamique selon le seuil de vigilance IA
   const filteredPredictions = predictionData.filter(d => (d.risque_prob || 0) >= seuilRisque);
 
+  // Calque d'alerte prédictive 3D (XGBoost)
   const predictionLayer = new ColumnLayer({
     id: 'prediction-layer',
     data: filteredPredictions,
@@ -112,6 +111,7 @@ export default function App() {
     }
   });
 
+  // Calque des anomalies actives (FIRMS / VIIRS / MODIS)
   const realtimeLayer = new ScatterplotLayer({
     id: 'realtime-layer',
     data: realtimeData,
@@ -131,7 +131,7 @@ export default function App() {
   return (
     <div className="relative w-screen h-screen bg-slate-950 overflow-hidden font-sans">
 
-      {/* Panneau de contrôle */}
+      {/* Panneau de contrôle et monitoring OSINT */}
       <div className="absolute top-4 left-4 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-700/60 p-5 rounded-xl text-white shadow-2xl w-80">
         <h1 className="text-lg font-bold flex items-center gap-2 text-rose-500">
           <span>🔥</span> Tunisia Fire Watch
@@ -164,18 +164,22 @@ export default function App() {
           </div>
         </div>
 
-        {loading && <div className="mt-3 text-xs text-cyan-400 animate-pulse">Synchronisation...</div>}
+        {loading && (
+          <div className="mt-3 text-xs text-cyan-400 animate-pulse">
+            Synchronisation des flux géospatiaux...
+          </div>
+        )}
       </div>
 
-      {/* Contrôles de navigation */}
+      {/* Boutons de navigation cartographique */}
       <div className="absolute top-4 right-4 z-20 flex flex-col bg-slate-900/90 backdrop-blur-md border border-slate-700/60 rounded-xl shadow-2xl overflow-hidden">
-        <button onClick={handleZoomIn} className="w-10 h-10 text-white font-bold hover:bg-slate-800 border-b border-slate-700/60">+</button>
-        <button onClick={handleZoomOut} className="w-10 h-10 text-white font-bold hover:bg-slate-800 border-b border-slate-700/60">-</button>
-        <button onClick={handleResetView} className="w-10 h-10 hover:bg-slate-800 text-xs">🏠</button>
+        <button onClick={handleZoomIn} title="Zoomer" className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700">+</button>
+        <button onClick={handleZoomOut} title="Dézoomer" className="w-10 h-10 flex items-center justify-center text-white text-lg font-bold hover:bg-slate-800 transition border-b border-slate-700/60 active:bg-slate-700">-</button>
+        <button onClick={handleResetView} title="Réinitialiser la vue (Tunisie)" className="w-10 h-10 flex items-center justify-center text-rose-400 hover:bg-slate-800 transition active:bg-slate-700 text-xs">🏠</button>
       </div>
 
-      {/* Moteur cartographique */}
-      <div className="absolute inset-0 w-full h-full z-0">
+      {/* Moteur cartographique 3D Deck.gl + MapLibre */}
+      <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 0 }}>
         <DeckGL
           viewState={viewState}
           onViewStateChange={e => setViewState(e.viewState)}
@@ -183,6 +187,8 @@ export default function App() {
           layers={[predictionLayer, realtimeLayer]}
           getTooltip={({ object }) => {
             if (!object) return null;
+
+            // 1. Info-bulle pour les colonnes XGBoost
             if (object.risque_prob !== undefined) {
               return {
                 html: `
@@ -193,7 +199,11 @@ export default function App() {
                     <div>📍 Coordonnées : <b>${Number(object.lat).toFixed(3)}, ${Number(object.lon).toFixed(3)}</b></div>
                     <div>⛰️ Altitude réelle : <b>${object.elevation_m ?? '-'} m</b></div>
                     <div>🌡️ Température max : <b>${object.t_max ?? '-'} °C</b></div>
+                    <div>💧 Humidité relative : <b>${object.h_mean ?? '-'} %</b></div>
                     <div>💨 Vitesse du vent : <b>${object.wind_max ?? '-'} km/h</b></div>
+                    <div>🌧️ Précipitations : <b>${object.precip_sum ?? 0} mm</b></div>
+                    ${object.ndvi !== undefined ? `<div>🌿 Biomasse (NDVI) : <b>${Number(object.ndvi).toFixed(2)}</b></div>` : ''}
+                    ${object.ndwi !== undefined ? `<div>💦 Stress hydrique (NDWI) : <b>${Number(object.ndwi).toFixed(2)}</b></div>` : ''}
                     <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #38bdf8; font-size: 11px;">
                       Modélisation prédictive (XGBoost + MODIS)
                     </div>
@@ -201,9 +211,25 @@ export default function App() {
                 `
               };
             }
+
+            // 2. Info-bulle pour les foyers FIRMS (Avec Jointure Spatiale OSINT)
             if (object.frp !== undefined) {
               const frpVal = Number(object.frp || 0);
               const severityText = frpVal > 30 ? 'Intense (Critique)' : frpVal > 10 ? 'Modéré' : 'Faible';
+
+              // Algorithme OSINT : Recherche de la maille météo/XGBoost la plus proche géographiquement
+              let meteoProche = null;
+              if (predictionData && predictionData.length > 0) {
+                let minDistance = Infinity;
+                predictionData.forEach(p => {
+                  const dist = Math.pow(p.lat - object.latitude, 2) + Math.pow(p.lon - object.longitude, 2);
+                  if (dist < minDistance) {
+                    minDistance = dist;
+                    meteoProche = p;
+                  }
+                });
+              }
+
               return {
                 html: `
                   <div style="background-color: #0f172a; color: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid #e11d48; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);">
@@ -211,7 +237,20 @@ export default function App() {
                       🔥 Foyer Actif Détecté (NASA FIRMS)
                     </div>
                     <div>📍 Gouvernorat : <b>${object.gouvernorat || 'Secteur forestier'}</b></div>
-                    <div>⚡ Puissance radiative : <b>${object.frp} MW (${severityText})</b></div>
+                    <div>⚡ Puissance radiative (FRP) : <b>${object.frp} MW (${severityText})</b></div>
+                    <div>🛡️ Indice de confiance : <b>${formatConfidence(object.confidence)}</b></div>
+                    <div>🛰️ Coordonnées GPS : <b>${Number(object.latitude).toFixed(4)}, ${Number(object.longitude).toFixed(4)}</b></div>
+                    
+                    ${meteoProche ? `
+                    <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #e11d48; color: #cbd5e1; font-size: 11px;">
+                      <div style="color: #38bdf8; margin-bottom: 2px;">Données environnementales de la zone :</div>
+                      <div>🌡️ Température max : <b>${meteoProche.t_max ?? '-'} °C</b></div>
+                      <div>💨 Vitesse du vent : <b>${meteoProche.wind_max ?? '-'} km/h</b></div>
+                      <div>⛰️ Altitude : <b>${meteoProche.elevation_m ?? '-'} m</b></div>
+                      <div>🌿 Biomasse (NDVI) : <b>${Number(meteoProche.ndvi).toFixed(2) ?? '-'}</b></div>
+                    </div>
+                    ` : ''}
+
                     <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #334155; color: #fb7185; font-size: 11px;">
                       Surveillance satellitaire en temps réel (VIIRS / MODIS)
                     </div>
@@ -221,12 +260,11 @@ export default function App() {
             }
           }}
         >
-          {/* 3. Injection explicite de l'instance mapLibre configurée pour afficher les tuiles */}
+          {/* L'intégration native sans dépendance externe conflictuelle */}
           <Map
-            mapLib={maplibregl}
-            reuseMaps
-            style={{ width: '100%', height: '100%' }}
             mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+            onLoad={() => console.log("Fond de carte MapLibre chargé avec succès !")}
+            onError={(e) => console.error("Erreur MapLibre :", e)}
           />
         </DeckGL>
       </div>
