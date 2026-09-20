@@ -93,7 +93,7 @@ export default function App() {
 
         // 2. Alertes Thermiques Temps Réel (FIRMS)
         const { data: firmsData, error: supabaseError } = await supabase
-          .from('foyers_actifs')
+          .from('foyers_actifs_temps_reel')
           .select('latitude, longitude, frp, confidence, gouvernorat')
           .gte('latitude', 30.2)
           .lte('latitude', 37.5)
